@@ -1,0 +1,9 @@
+# Official Wavedash CLI config: https://docs.wavedash.com/cli/configuration
+# Replace game_id with the id from your Wavedash developer dashboard.
+game_id = "your-game-id"
+upload_dir = "./dist"
+
+[custom]
+version = "0.1.0"
+# Vite emits the main bundle as dist/game.js (see vite.config.ts).
+entrypoint = "game.js"

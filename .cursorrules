@@ -1,0 +1,21 @@
+# Game_GitHubJam2026 — Cursor agent rules
+
+> Keep in sync with `.cursor/rules/gamedev-jam-standards.mdc` when you change these rules.
+
+## TypeScript
+
+- Always respect strict TypeScript typing: no careless `any`, prefer explicit types, narrow unions, and accurate Phaser / DOM typings. Fix type errors instead of suppressing them unless there is a documented, unavoidable exception.
+
+## YouTube Playables — responsive canvas
+
+- Treat canvas size as **fully dynamic**: the game must resize correctly when the host viewport, orientation, or safe-area insets change.
+- Use Phaser’s **Scale Manager** (`scale`, `resize`, parent sizing) so the canvas follows the container; avoid hard-coded dimensions as the only layout strategy.
+- Keep embedding-friendly behavior: no reliance on a fixed desktop-only resolution.
+
+## Open source — comments
+
+- Write **all new and substantially edited code comments** in clear, polite **English** so reviewers and contributors can follow intent easily. Prefer short, accurate sentences over jargon.
+
+## Phaser 3 API reference
+
+- Prefer **current Phaser 3 APIs** and naming. When this workspace has **@Phaser3** (or equivalent indexed Phaser 3 docs) attached, **consult that documentation first** for APIs, config shapes, and deprecations; fall back to the official Phaser 3 reference if needed.

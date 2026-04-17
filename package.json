@@ -1,0 +1,22 @@
+{
+  "name": "game-github-jam-2026",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Gamedev.js Jam 2026 — Machines! theme scaffold: Phaser 3 + TypeScript + Vite (Wavedash, YouTube Playables, Ethereum placeholder)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.88.2"
+  },
+  "devDependencies": {
+    "typescript": "~5.7.2",
+    "vite": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_comment": "Mirror for CI/docs. The Wavedash CLI reads wavedash.toml — keep game_id and paths in sync.",
+  "game_id": "your-game-id",
+  "upload_dir": "./dist",
+  "engine": "custom",
+  "custom": {
+    "version": "0.1.0",
+    "entrypoint": "game.js"
+  }
+}
