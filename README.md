@@ -29,7 +29,7 @@ Each player beat has a **±200 ms** input window. Press within the window to reg
 | **Build it with Phaser** | Phaser 3.88 + TypeScript + Vite; scenes `Boot` → `Preloader` → `MainScene` |
 | **Open Source by GitHub** | MIT `LICENSE`, permissive structure for forks |
 | **Deploy to Wavedash** | `wavedash.toml` + `wavedash.json`; production bundle emits `dist/game.js` |
-| **YouTube Playables** | `Scale.RESIZE`, responsive layout, `viewport-fit=cover`, safe-area padding |
+| **YouTube Playables** | `Scale.FIT` + `CENTER_BOTH` on a 960×540 (16:9) design, `viewport-fit=cover`, safe-area padding |
 | **Ethereum by OP Guild** | `src/web3/` placeholders (add viem/ethers/wagmi to activate) |
 
 ## Tech stack
@@ -68,7 +68,7 @@ src/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   web3/                  # Ethereum integration stubs
   utils/
-    safeArea.ts          # Responsive scale config
+    safeArea.ts          # FIT-mode scale config + safe-area inset probe
     wavedash.ts          # Wavedash load-complete notification
 public/
   assets/                # Drop real art/audio here when ready
@@ -115,6 +115,15 @@ Rock-paper-scissors style resolution with Heat management:
   - `VULNERABLE` (COOL vs ATTACK): **160 ms**
 - **Heat danger vignette**: When Heat ≥ 70, a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
 - **Relief flash**: The instant a successful `COOL` pulls Heat back below 70, the vignette is cleared and `Camera.flash` bursts a blue-white `(136, 204, 255)` tint — the "I made it!" release.
+
+### Responsive canvas (Phase 4)
+
+Built for embedded hosts (YouTube Playables, Wavedash, plain web) where the viewport size is unknown until runtime.
+
+- **Design resolution**: fixed landscape **960 × 540 (16:9)**. Gameplay code reads `this.scale.width / height`, which under FIT mode always equals the design size — layout math is therefore deterministic on every target.
+- **Scale mode**: `Phaser.Scale.FIT` + `Phaser.Scale.CENTER_BOTH`. The Scale Manager uniformly scales the canvas to fit the parent container while preserving the 16:9 aspect; the canvas is always centred inside any remaining letterbox bars.
+- **CSS hygiene** (`index.html`): `html, body` use `margin: 0; overflow: hidden`, the `#app` parent fills the viewport with `safe-area-inset-*` padding for notched devices, and the injected `canvas` is `display: block` with `max-width / max-height: 100%` to prevent inline-baseline whitespace or overflow.
+- **Resize hook**: `MainScene` subscribes to `this.scale.on("resize", onResize)` at `create()` and unsubscribes on `SHUTDOWN`. Under FIT the reported size is constant, so the handler is a no-op scaffold today — kept as an extension point for future orientation-specific layouts or a mode swap.
 
 ### Audio (Phase 2)
 

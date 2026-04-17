@@ -38,14 +38,23 @@ export function readSafeAreaInsetsPx(): {
 
 /**
  * Scale config for embed-friendly hosts (YouTube Playables, etc.).
- * RESIZE keeps the canvas tied to the parent container as it changes size.
+ *
+ * FIT mode keeps the logical resolution fixed at the provided design size
+ * (width x height) and uniformly scales the canvas to fit the parent while
+ * preserving the aspect ratio. This yields letterboxing on viewports whose
+ * aspect ratio differs from the design, but guarantees that every layout
+ * calculation in game code sees a stable coordinate space — which is what
+ * Playables-style embeds expect.
+ *
+ * CENTER_BOTH keeps the canvas centered horizontally and vertically inside
+ * the parent, so the letterbox bars are symmetric.
  */
 export function getGameScaleConfig(
   width: number,
   height: number,
 ): Phaser.Types.Core.ScaleConfig {
   return {
-    mode: Phaser.Scale.RESIZE,
+    mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
     width,
     height,

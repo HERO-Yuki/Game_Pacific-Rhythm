@@ -6,8 +6,13 @@ import { PreloaderScene } from "./scenes/PreloaderScene";
 import { getGameScaleConfig } from "./utils/safeArea";
 
 /**
- * Logical design resolution; with Scale.RESIZE the canvas follows the host while
- * layout code uses scale.width / scale.height for responsive placement.
+ * Logical design resolution for the landscape-oriented UI (16:9).
+ *
+ * With Scale.FIT the internal coordinate space is fixed at this size; the
+ * Scale Manager uniformly scales the canvas to fit the parent container.
+ * Layout code reads scale.width / scale.height which, under FIT, always
+ * returns these design dimensions — giving a stable coordinate system for
+ * every platform the game ships to (YouTube Playables embeds included).
  */
 const DESIGN_WIDTH = 960;
 const DESIGN_HEIGHT = 540;

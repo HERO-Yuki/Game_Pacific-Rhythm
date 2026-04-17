@@ -30,6 +30,15 @@
         padding: env(safe-area-inset-top) env(safe-area-inset-right)
           env(safe-area-inset-bottom) env(safe-area-inset-left);
       }
+      /* Phaser injects a canvas into #app; display:block removes the inline
+         baseline whitespace, and the max-* rules keep FIT-mode letterboxing
+         from ever overflowing the host viewport. */
+      #app canvas {
+        display: block;
+        margin: 0;
+        max-width: 100%;
+        max-height: 100%;
+      }
     </style>
   </head>
   <body>
