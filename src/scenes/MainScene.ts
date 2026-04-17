@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { audio } from "../audio/AudioManager";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 
 /* ===================================================================
@@ -42,6 +43,41 @@ const TOTAL_BEATS = SEQ_LEN * 2;
 const HP_INIT = { player: 100, enemy: 100 } as const;
 const OVERHEAT_THRESHOLD = 100;
 const OVERHEAT_STREAK_LIMIT = 3;
+
+/**
+ * Heat at or above this value is the "danger zone": the screen shows a
+ * pulsing red vignette. Dropping back below triggers a relief flash.
+ */
+const HEAT_DANGER = 70;
+
+/**
+ * Hit-stop durations per event kind (milliseconds). Tuned to roughly
+ * 150–200 ms — long enough to register an impact without hurting pace.
+ */
+const HITSTOP_MS = {
+  clash: 180,
+  special: 180,
+  break: 200,
+  vulnerable: 160,
+} as const;
+
+/**
+ * Render depths for overlay layers. Centralised so adding new UI will
+ * not silently collide with existing z-order.
+ */
+const DEPTH = {
+  sparks: 40,
+  popText: 50,
+  rhythmCursor: 10,
+  heatVignette: 90,
+  gameOver: 100,
+} as const;
+
+/**
+ * RGB triple for the "escaped the danger zone" camera flash. Phaser's
+ * Camera.flash takes 0–255 channel values.
+ */
+const HEAT_RELIEF_RGB = { r: 136, g: 204, b: 255 } as const;
 
 const DMG = {
   attack: 20,
@@ -95,6 +131,10 @@ const ENEMY_POOL: ActionType[] = [
   ActionType.GUARD,
   ActionType.IDLE,
 ];
+
+/** Stereo pan for sound effects: enemy on the left, player on the right. */
+const PAN_ENEMY = -0.5;
+const PAN_PLAYER = 0.5;
 
 const FONT = "system-ui, 'Segoe UI', sans-serif";
 
@@ -156,6 +196,27 @@ export class MainScene extends Phaser.Scene {
   private rhythmEnded = false;
   private buttonsReady = false;
 
+  /**
+   * Latches true on the first resolveStep() that actually enforces
+   * overheat, so the 3-beep alarm fires once per turn instead of once
+   * per affected step.
+   */
+  private ohAlarmedThisTurn = false;
+
+  /* ---------- hit-stop (freeze-frame) state ---------- */
+  private hitStopActive = false;
+  /**
+   * Handle returned by window.setTimeout. We use an out-of-band timer
+   * because the scene's own Time.Clock is paused during hit-stop; we
+   * track the handle so we can cancel it on scene shutdown/restart.
+   */
+  private hitStopResumeHandle: number | null = null;
+
+  /* ---------- heat-danger UI state ---------- */
+  private heatDangerActive = false;
+  private heatVignette!: Phaser.GameObjects.Rectangle;
+  private heatAlertTween?: Phaser.Tweens.Tween;
+
   /* ---------- UI refs ---------- */
   private enemyRect!: Phaser.GameObjects.Rectangle;
   private playerRect!: Phaser.GameObjects.Rectangle;
@@ -209,9 +270,18 @@ export class MainScene extends Phaser.Scene {
     this.refreshHUD();
 
     this.scale.on("resize", this.onResize, this);
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () =>
-      this.scale.off("resize", this.onResize, this),
-    );
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.scale.off("resize", this.onResize, this);
+      // If a hit-stop is in flight, its out-of-band timeout would try
+      // to poke a destroyed scene; drop the handle to be safe.
+      this.cancelHitStop();
+    });
+
+    // Browser autoplay policy: the AudioContext can only start after a
+    // user gesture, so the first pointer/key event unlocks audio.
+    const unlock = (): void => audio.unlock();
+    this.input.once("pointerdown", unlock);
+    this.input.keyboard?.once("keydown", unlock);
 
     notifyWavedashLoadComplete();
     this.beginWave();
@@ -236,6 +306,9 @@ export class MainScene extends Phaser.Scene {
     this.lastProcessedBeat = -1;
     this.rhythmEnded = false;
     this.buttonsReady = false;
+    this.ohAlarmedThisTurn = false;
+    this.hitStopActive = false;
+    this.heatDangerActive = false;
   }
 
   private isRhythmPhase(): boolean {
@@ -266,7 +339,22 @@ export class MainScene extends Phaser.Scene {
     this.buildSequencer(W, H);
     this.buildRhythmIndicators(W, H);
     this.buildButtons(W, H);
+    this.buildHeatOverlay(W, H);
     this.buildGameOver(W, H);
+  }
+
+  /**
+   * Full-screen red tint used as a danger vignette when Heat ≥ 70.
+   * Sits below the game-over layer (depth 100) so it never occludes
+   * the restart prompt. The relief flash uses Phaser's built-in
+   * Camera.flash so it does not need its own overlay.
+   */
+  private buildHeatOverlay(W: number, H: number): void {
+    this.heatVignette = this.add
+      .rectangle(0, 0, W, H, PAL.heatRed, 0)
+      .setOrigin(0)
+      .setDepth(DEPTH.heatVignette)
+      .setVisible(false);
   }
 
   private buildCharacters(W: number, H: number): void {
@@ -403,7 +491,7 @@ export class MainScene extends Phaser.Scene {
     this.rhythmCursor = this.add.rectangle(0, seqY, sz + 10, sz + 10);
     this.rhythmCursor.setFillStyle();
     this.rhythmCursor.setStrokeStyle(3, PAL.cursor);
-    this.rhythmCursor.setVisible(false).setDepth(10);
+    this.rhythmCursor.setVisible(false).setDepth(DEPTH.rhythmCursor);
 
     this.timingBar = this.add.rectangle(
       0,
@@ -414,7 +502,7 @@ export class MainScene extends Phaser.Scene {
       0.8,
     );
     this.timingBar.setOrigin(0, 0.5);
-    this.timingBar.setVisible(false).setDepth(10);
+    this.timingBar.setVisible(false).setDepth(DEPTH.rhythmCursor);
 
     this.beatFlash = this.add.rectangle(
       W / 2,
@@ -424,7 +512,7 @@ export class MainScene extends Phaser.Scene {
       PAL.cursor,
       0,
     );
-    this.beatFlash.setDepth(10);
+    this.beatFlash.setDepth(DEPTH.rhythmCursor);
   }
 
   private buildButtons(W: number, H: number): void {
@@ -501,7 +589,7 @@ export class MainScene extends Phaser.Scene {
       this.goScoreText,
       hint,
     ]);
-    this.goLayer.setVisible(false).setDepth(100);
+    this.goLayer.setVisible(false).setDepth(DEPTH.gameOver);
     dim.setInteractive().on("pointerdown", () => {
       if (this.phase === GamePhase.GAME_OVER) this.scene.restart();
     });
@@ -748,6 +836,7 @@ export class MainScene extends Phaser.Scene {
     if (this.playerSeq[pIdx] !== ActionType.IDLE) return;
 
     this.playerSeq[pIdx] = action;
+    audio.playClick({ pan: PAN_PLAYER });
 
     const beatCentre = (pIdx + SEQ_LEN) * RHYTHM_MS;
     const offset = Math.abs(elapsed - beatCentre);
@@ -779,6 +868,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private pulseBeat(): void {
+    audio.playBeat();
     this.beatFlash.setAlpha(0.7);
     this.tweens.add({
       targets: this.beatFlash,
@@ -811,6 +901,10 @@ export class MainScene extends Phaser.Scene {
       this.playerSeq.join(" "),
     );
 
+    // Reset the per-turn alarm latch; resolveStep() will arm it the
+    // moment an overheat is actually enforced.
+    this.ohAlarmedThisTurn = false;
+
     let step = 0;
     this.time.addEvent({
       delay: RESOLVE_MS,
@@ -836,6 +930,10 @@ export class MainScene extends Phaser.Scene {
       const s = this.pSlots[i];
       s.label.setText("OH!");
       s.bg.setFillStyle(PAL.heatRed, 0.7);
+      if (!this.ohAlarmedThisTurn) {
+        this.ohAlarmedThisTurn = true;
+        audio.playOverheat({ pan: PAN_PLAYER });
+      }
       if (this.ohStreak >= OVERHEAT_STREAK_LIMIT) {
         this.endGame("MELTDOWN");
         return;
@@ -880,6 +978,7 @@ export class MainScene extends Phaser.Scene {
     switch (pAct) {
       case ActionType.ATTACK:
         this.playerHeat += HEAT_DELTA.attack;
+        audio.playAttack({ pan: PAN_PLAYER });
         if (eAct === ActionType.ATTACK) {
           this.enemyHP -= DMG.clash;
           this.playerHP -= DMG.clash;
@@ -890,11 +989,16 @@ export class MainScene extends Phaser.Scene {
           this.flash(eR, VFX.flash.enemyHit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(120, 200);
+          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playDamage({ pan: PAN_ENEMY, volume: 0.8 });
+          audio.playDamage({ pan: PAN_PLAYER, volume: 0.8 });
+          this.applyHitStop(HITSTOP_MS.clash);
         } else if (eAct === ActionType.GUARD) {
           msg = "BLOCKED!";
           this.emitSparks(eR.x, eR.y, VFX.spark.block);
           this.flash(eR, VFX.flash.enemyBlock);
           this.shake(30, 80);
+          audio.playGuard({ pan: PAN_ENEMY });
         } else {
           this.enemyHP -= DMG.attack;
           msg = `HIT! Enemy -${DMG.attack}`;
@@ -902,6 +1006,7 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(eR.x, eR.y, VFX.spark.hit);
           this.flash(eR, VFX.flash.enemyHit);
           this.shake(60, 140);
+          audio.playDamage({ pan: PAN_ENEMY });
         }
         break;
 
@@ -911,6 +1016,8 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(pR.x, pR.y, VFX.spark.block);
           this.flash(pR, VFX.flash.playerGuard);
           this.shake(30, 80);
+          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playGuard({ pan: PAN_PLAYER });
         } else {
           msg = "\u2014";
         }
@@ -918,6 +1025,7 @@ export class MainScene extends Phaser.Scene {
 
       case ActionType.COOL:
         this.playerHeat += HEAT_DELTA.cool;
+        audio.playCool({ pan: PAN_PLAYER });
         if (eAct === ActionType.ATTACK) {
           this.playerHP -= DMG.coolVulnerable;
           msg = `VULNERABLE! Player -${DMG.coolVulnerable}`;
@@ -925,6 +1033,9 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(pR.x, pR.y, VFX.spark.crit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(180, 250);
+          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playDamage({ pan: PAN_PLAYER });
+          this.applyHitStop(HITSTOP_MS.vulnerable);
         } else {
           msg = "COOLING\u2026";
           this.popText(pR, "COOL", VFX.pop.cool);
@@ -932,8 +1043,13 @@ export class MainScene extends Phaser.Scene {
         }
         break;
 
-      case ActionType.SPECIAL:
+      case ActionType.SPECIAL: {
         this.playerHeat += HEAT_DELTA.special;
+        audio.playSpecial({ pan: PAN_PLAYER });
+        // Hit-stop is slightly longer on a GUARD break because the
+        // payoff of punching through a defence is bigger.
+        const hitStopMs =
+          eAct === ActionType.GUARD ? HITSTOP_MS.break : HITSTOP_MS.special;
         if (eAct === ActionType.GUARD) {
           this.enemyHP -= DMG.specialVsGuard;
           msg = `BREAK! Enemy -${DMG.specialVsGuard}`;
@@ -946,7 +1062,10 @@ export class MainScene extends Phaser.Scene {
         this.emitSparks(eR.x, eR.y, VFX.spark.special);
         this.flash(eR, VFX.flash.enemySpecial);
         this.shake(200, 300);
+        audio.playDamage({ pan: PAN_ENEMY });
+        this.applyHitStop(hitStopMs);
         break;
+      }
 
       default:
         if (eAct === ActionType.ATTACK) {
@@ -956,6 +1075,8 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(pR.x, pR.y, VFX.spark.hit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(60, 140);
+          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playDamage({ pan: PAN_PLAYER });
         } else {
           msg = "\u2014";
         }
@@ -992,6 +1113,11 @@ export class MainScene extends Phaser.Scene {
     this.rhythmCursor.setVisible(false);
     this.timingBar.setVisible(false);
     this.buttonsReady = false;
+    // Release any active freeze / danger pulse so the game-over layer
+    // animates in cleanly instead of staying frozen or tinted red.
+    this.cancelHitStop();
+    this.clearHeatAlert();
+    this.heatDangerActive = false;
     this.setPhaseDisplay("GAME OVER", "#ff4444");
     console.log(`[GameOver] ${reason} | Score: ${this.score}`);
 
@@ -1022,12 +1148,38 @@ export class MainScene extends Phaser.Scene {
     if (ht >= OVERHEAT_THRESHOLD) {
       this.playerHeatBar.setFillStyle(PAL.heatRed);
       this.playerHeatText.setColor("#ff0000");
-    } else if (ht >= 70) {
+    } else if (ht >= HEAT_DANGER) {
       this.playerHeatBar.setFillStyle(0xff4400);
       this.playerHeatText.setColor("#ff4400");
     } else {
       this.playerHeatBar.setFillStyle(PAL.heatOrange);
       this.playerHeatText.setColor("#ff6600");
+    }
+
+    this.updateHeatDangerUI(ht);
+  }
+
+  /**
+   * Arms or disarms the danger-zone vignette based on the current heat
+   * value, and fires a one-shot relief flash on the falling edge. Acts
+   * only on state transitions so each event fires once per crossing.
+   *
+   * During GAME_OVER we suppress both directions: a meltdown should
+   * not show a "you're safe!" flash, and endGame() already tears down
+   * the alert directly.
+   */
+  private updateHeatDangerUI(heat: number): void {
+    if (this.phase === GamePhase.GAME_OVER) return;
+
+    const nowDanger = heat >= HEAT_DANGER;
+    if (nowDanger === this.heatDangerActive) return;
+
+    this.heatDangerActive = nowDanger;
+    if (nowDanger) {
+      this.activateHeatAlert();
+    } else {
+      this.clearHeatAlert();
+      this.playHeatReliefFlash();
     }
   }
 
@@ -1091,6 +1243,77 @@ export class MainScene extends Phaser.Scene {
   /*  Effects                                                       */
   /* ============================================================ */
 
+  /**
+   * Freeze-frame for "big impact" events: pause the scene's Time.Clock
+   * (next resolveStep and delayedCalls) and all active tweens, then
+   * resume after `duration` ms via an out-of-band window.setTimeout
+   * (Phaser timers would be paused by the very flag we just set).
+   *
+   * Camera shake intentionally keeps running — its `preRender` uses
+   * frame delta, so the screen rattles on the frozen frame which is
+   * the classic fighting-game hit-stop feel.
+   */
+  private applyHitStop(duration: number): void {
+    if (this.hitStopActive) return;
+    if (this.phase !== GamePhase.RESOLUTION) return;
+
+    this.hitStopActive = true;
+    this.time.paused = true;
+    this.tweens.pauseAll();
+
+    this.hitStopResumeHandle = window.setTimeout(() => {
+      this.hitStopResumeHandle = null;
+      // The scene may have been shut down or restarted while frozen.
+      if (!this.scene.isActive()) return;
+      this.time.paused = false;
+      this.tweens.resumeAll();
+      this.hitStopActive = false;
+    }, duration);
+  }
+
+  private cancelHitStop(): void {
+    if (this.hitStopResumeHandle !== null) {
+      window.clearTimeout(this.hitStopResumeHandle);
+      this.hitStopResumeHandle = null;
+    }
+    if (this.hitStopActive) {
+      this.time.paused = false;
+      this.tweens.resumeAll();
+      this.hitStopActive = false;
+    }
+  }
+
+  /** Start the danger-zone pulse on the red vignette. Idempotent. */
+  private activateHeatAlert(): void {
+    this.heatAlertTween?.stop();
+    this.heatVignette.setVisible(true).setAlpha(0.15);
+    this.heatAlertTween = this.tweens.add({
+      targets: this.heatVignette,
+      alpha: { from: 0.15, to: 0.38 },
+      duration: 520,
+      ease: "Sine.easeInOut",
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  /** Remove the red vignette and stop its pulse. */
+  private clearHeatAlert(): void {
+    this.heatAlertTween?.stop();
+    this.heatAlertTween = undefined;
+    this.heatVignette.setVisible(false).setAlpha(0);
+  }
+
+  /**
+   * Bright blue-white camera flash to celebrate leaving the danger
+   * zone. Uses Phaser's built-in effect so it sits above every layer,
+   * including the overlays we manage ourselves.
+   */
+  private playHeatReliefFlash(): void {
+    const { r, g, b } = HEAT_RELIEF_RGB;
+    this.cameras.main.flash(420, r, g, b);
+  }
+
   private shake(intensity: number, duration = 140): void {
     this.cameras.main.shake(duration, intensity / 10000);
   }
@@ -1117,7 +1340,7 @@ export class MainScene extends Phaser.Scene {
         strokeThickness: 3,
       })
       .setOrigin(0.5)
-      .setDepth(50);
+      .setDepth(DEPTH.popText);
 
     this.tweens.add({
       targets: t,
@@ -1143,7 +1366,7 @@ export class MainScene extends Phaser.Scene {
       quantity: 14,
       emitting: false,
     });
-    emitter.setDepth(40);
+    emitter.setDepth(DEPTH.sparks);
     emitter.explode(14);
     this.time.delayedCall(600, () => emitter.destroy());
   }
@@ -1154,5 +1377,8 @@ export class MainScene extends Phaser.Scene {
 
   private onResize(size: Phaser.Structs.Size): void {
     this.cameras.main.setViewport(0, 0, size.width, size.height);
+    if (this.heatVignette) {
+      this.heatVignette.setSize(size.width, size.height);
+    }
   }
 }

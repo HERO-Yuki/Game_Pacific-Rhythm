@@ -4,7 +4,7 @@
 
 A rhythm-based sequencer battle game where you read the enemy's incoming program, then input your own counter-program in time with the beat. Miss the rhythm and your slot defaults to IDLE — leaving you wide open.
 
-Built entirely with **Phaser 3 shapes and text** (no image assets).
+Built entirely with **Phaser 3 shapes and text** (no image assets) and a fully **procedural audio engine** built on the Web Audio API (no sample files).
 
 ## How to play
 
@@ -63,7 +63,9 @@ src/
   scenes/
     BootScene.ts         # Scale refresh → Preloader
     PreloaderScene.ts    # Asset loading (currently pass-through) → MainScene
-    MainScene.ts         # Core game: rhythm sequencer, combat, VFX (~1000 lines)
+    MainScene.ts         # Core game: rhythm sequencer, combat, VFX, game feel
+  audio/
+    AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   web3/                  # Ethereum integration stubs
   utils/
     safeArea.ts          # Responsive scale config
@@ -103,6 +105,37 @@ Rock-paper-scissors style resolution with Heat management:
 - **Camera shake**: Intensity and duration scale with damage (light for blocks, heavy for SPECIAL)
 - **Hit sparks**: Particle burst of coloured rectangles at point of impact
 - **Beat bounce**: Characters, labels, and buttons pulse scale 1.0 → 1.05 → 1.0 every beat
+
+### Game feel (Phase 3)
+
+- **Hit-stop (freeze-frame)**: Big impacts pause `Time.Clock` and all tweens for 160–200 ms so the moment really lands. Camera shake deliberately keeps running during the freeze for that classic fighting-game rattle.
+  - `CLASH` (ATK vs ATK): **180 ms**
+  - `BREAK` (SPECIAL vs GUARD): **200 ms**
+  - `SPECIAL` (regular hit): **180 ms**
+  - `VULNERABLE` (COOL vs ATTACK): **160 ms**
+- **Heat danger vignette**: When Heat ≥ 70, a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
+- **Relief flash**: The instant a successful `COOL` pulls Heat back below 70, the vignette is cleared and `Camera.flash` bursts a blue-white `(136, 204, 255)` tint — the "I made it!" release.
+
+### Audio (Phase 2)
+
+All sound effects are **generated at runtime** from oscillators and a shared noise buffer — no `.mp3` or `.wav` files ship with the build. Everything lives in `src/audio/AudioManager.ts` behind a singleton `audio` instance.
+
+| Method | Sound design | Triggered on |
+| --- | --- | --- |
+| `playBeat()`   | Sine 95 → 42 Hz thump                      | Every rhythm beat |
+| `playClick()`  | Square 1800 → 900 Hz + highpass            | Successful button input |
+| `playAttack()` | Sine 160 → 48 Hz + low-passed noise click  | ATTACK resolution |
+| `playGuard()`  | Detuned triangle partials (2100 / 3150 Hz) | GUARD deflect |
+| `playCool()`   | Bandpass-swept white noise                 | COOL action |
+| `playSpecial()`| Sawtooth sweep 120 → 1400 Hz + HP-noise    | SPECIAL action |
+| `playOverheat()`| Dissonant square triplet (880 / 932 Hz)   | First over-heat step per turn |
+| `playDamage()` | Sine thump + LP-swept noise                | HP loss |
+
+**Stereo**: Enemy sounds pan to `-0.5` and player sounds to `+0.5` via `StereoPannerNode` (with centre fallback on unsupported browsers).
+
+**Autoplay policy**: Browsers block audio until a user gesture, so the first pointer or key event in `MainScene` calls `audio.unlock()` which resumes the underlying `AudioContext`.
+
+**Future sample pipeline**: `AudioManager.preload(url)` is a stub ready to decode real files and back the same `playX()` API — integration points in `MainScene` will not have to change.
 
 ## Wavedash
 
