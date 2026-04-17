@@ -59,7 +59,11 @@ export function getGameScaleConfig(
     width,
     height,
     parent: "app",
+    // Defensive: if the host page ever forgets to size #app to the viewport,
+    // ask Phaser to stretch it so FIT has a meaningful box to fit into.
     expandParent: true,
+    // Snap draw positions to integer pixels to keep crisp edges on the
+    // shape-based UI after FIT scaling.
     autoRound: true,
   };
 }

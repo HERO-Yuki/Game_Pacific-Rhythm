@@ -106,25 +106,6 @@ Rock-paper-scissors style resolution with Heat management:
 - **Hit sparks**: Particle burst of coloured rectangles at point of impact
 - **Beat bounce**: Characters, labels, and buttons pulse scale 1.0 → 1.05 → 1.0 every beat
 
-### Game feel (Phase 3)
-
-- **Hit-stop (freeze-frame)**: Big impacts pause `Time.Clock` and all tweens for 160–200 ms so the moment really lands. Camera shake deliberately keeps running during the freeze for that classic fighting-game rattle.
-  - `CLASH` (ATK vs ATK): **180 ms**
-  - `BREAK` (SPECIAL vs GUARD): **200 ms**
-  - `SPECIAL` (regular hit): **180 ms**
-  - `VULNERABLE` (COOL vs ATTACK): **160 ms**
-- **Heat danger vignette**: When Heat ≥ 70, a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
-- **Relief flash**: The instant a successful `COOL` pulls Heat back below 70, the vignette is cleared and `Camera.flash` bursts a blue-white `(136, 204, 255)` tint — the "I made it!" release.
-
-### Responsive canvas (Phase 4)
-
-Built for embedded hosts (YouTube Playables, Wavedash, plain web) where the viewport size is unknown until runtime.
-
-- **Design resolution**: fixed landscape **960 × 540 (16:9)**. Gameplay code reads `this.scale.width / height`, which under FIT mode always equals the design size — layout math is therefore deterministic on every target.
-- **Scale mode**: `Phaser.Scale.FIT` + `Phaser.Scale.CENTER_BOTH`. The Scale Manager uniformly scales the canvas to fit the parent container while preserving the 16:9 aspect; the canvas is always centred inside any remaining letterbox bars.
-- **CSS hygiene** (`index.html`): `html, body` use `margin: 0; overflow: hidden`, the `#app` parent fills the viewport with `safe-area-inset-*` padding for notched devices, and the injected `canvas` is `display: block` with `max-width / max-height: 100%` to prevent inline-baseline whitespace or overflow.
-- **Resize hook**: `MainScene` subscribes to `this.scale.on("resize", onResize)` at `create()` and unsubscribes on `SHUTDOWN`. Under FIT the reported size is constant, so the handler is a no-op scaffold today — kept as an extension point for future orientation-specific layouts or a mode swap.
-
 ### Audio (Phase 2)
 
 All sound effects are **generated at runtime** from oscillators and a shared noise buffer — no `.mp3` or `.wav` files ship with the build. Everything lives in `src/audio/AudioManager.ts` behind a singleton `audio` instance.
@@ -145,6 +126,25 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
 **Autoplay policy**: Browsers block audio until a user gesture, so the first pointer or key event in `MainScene` calls `audio.unlock()` which resumes the underlying `AudioContext`.
 
 **Future sample pipeline**: `AudioManager.preload(url)` is a stub ready to decode real files and back the same `playX()` API — integration points in `MainScene` will not have to change.
+
+### Game feel (Phase 3)
+
+- **Hit-stop (freeze-frame)**: Big impacts pause `Time.Clock` and all tweens for 160–200 ms so the moment really lands. Camera shake deliberately keeps running during the freeze for that classic fighting-game rattle.
+  - `CLASH` (ATK vs ATK): **180 ms**
+  - `BREAK` (SPECIAL vs GUARD): **200 ms**
+  - `SPECIAL` (regular hit): **180 ms**
+  - `VULNERABLE` (COOL vs ATTACK): **160 ms**
+- **Heat danger vignette**: When Heat ≥ 70, a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
+- **Relief flash**: The instant a successful `COOL` pulls Heat back below 70, the vignette is cleared and `Camera.flash` bursts a blue-white `(136, 204, 255)` tint — the "I made it!" release.
+
+### Responsive canvas (Phase 4)
+
+Built for embedded hosts (YouTube Playables, Wavedash, plain web) where the viewport size is unknown until runtime.
+
+- **Design resolution**: fixed landscape **960 × 540 (16:9)**. Gameplay code reads `this.scale.width / height`, which under FIT mode always equals the design size — layout math is therefore deterministic on every target.
+- **Scale mode**: `Phaser.Scale.FIT` + `Phaser.Scale.CENTER_BOTH`. The Scale Manager uniformly scales the canvas to fit the parent container while preserving the 16:9 aspect; the canvas is always centred inside any remaining letterbox bars.
+- **CSS hygiene** (`index.html`): `html, body` use `margin: 0; overflow: hidden`, the `#app` parent fills the viewport with `safe-area-inset-*` padding for notched devices, and the injected `canvas` is `display: block` with `max-width / max-height: 100%` to prevent inline-baseline whitespace or overflow.
+- **Resize hook**: `MainScene` subscribes to `this.scale.on("resize", onResize)` at `create()` and unsubscribes on `SHUTDOWN`. Under FIT the reported size is constant, so the handler is a no-op scaffold today — kept as an extension point for future orientation-specific layouts or a mode swap.
 
 ## Wavedash
 

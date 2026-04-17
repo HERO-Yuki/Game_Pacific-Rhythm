@@ -1376,19 +1376,14 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   /**
-   * Resize handler hook.
-   *
-   * Under Scale.FIT the logical game size is fixed at DESIGN_WIDTH x
-   * DESIGN_HEIGHT, so `size` reported here stays constant across viewport /
-   * orientation changes and this method is effectively a no-op for now. The
-   * subscription (see `create()`) is kept in place as an extension point: if
-   * we later add orientation-specific layouts or swap to Scale.RESIZE, this
-   * is where we would rebuild size-dependent UI geometry.
+   * Resize hook. Under Scale.FIT the `size` reported here is the fixed logical
+   * game size, so today this is effectively a no-op — the camera viewport and
+   * heat vignette are already built to those dimensions. The subscription is
+   * kept as an extension point for future orientation-aware layouts or a mode
+   * swap to Scale.RESIZE, where these calls become meaningful.
    */
   private onResize(size: Phaser.Structs.Size): void {
     this.cameras.main.setViewport(0, 0, size.width, size.height);
-    if (this.heatVignette) {
-      this.heatVignette.setSize(size.width, size.height);
-    }
+    this.heatVignette?.setSize(size.width, size.height);
   }
 }
