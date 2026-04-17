@@ -1028,7 +1028,7 @@ export class MainScene extends Phaser.Scene {
         audio.playCool({ pan: PAN_PLAYER });
         if (kAct === ActionType.ATTACK) {
           this.playerHP -= DMG.coolVulnerable;
-          msg = `VULNERABLE! Player -${DMG.coolVulnerable}`;
+          msg = `VULNERABLE! PLAYER -${DMG.coolVulnerable}`;
           this.popText(pR, `-${DMG.coolVulnerable}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.crit);
           this.flash(pR, VFX.flash.playerHit);
@@ -1070,7 +1070,7 @@ export class MainScene extends Phaser.Scene {
       default:
         if (kAct === ActionType.ATTACK) {
           this.playerHP -= DMG.attack;
-          msg = `HIT! Player -${DMG.attack}`;
+          msg = `HIT! PLAYER -${DMG.attack}`;
           this.popText(pR, `-${DMG.attack}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.hit);
           this.flash(pR, VFX.flash.playerHit);
@@ -1131,12 +1131,12 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   private refreshHUD(): void {
-    const eh = Math.max(0, this.kaijuHP);
+    const kh = Math.max(0, this.kaijuHP);
     const ph = Math.max(0, this.playerHP);
     const ht = Math.max(0, this.playerHeat);
 
-    this.kaijuHPText.setText(`HP ${eh}`);
-    this.kaijuHPBar.displayWidth = this.barMaxW * (eh / HP_INIT.kaiju);
+    this.kaijuHPText.setText(`HP ${kh}`);
+    this.kaijuHPBar.displayWidth = this.barMaxW * (kh / HP_INIT.kaiju);
 
     this.playerHPText.setText(`HP ${ph}`);
     this.playerHPBar.displayWidth = this.barMaxW * (ph / HP_INIT.player);
