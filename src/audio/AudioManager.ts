@@ -7,10 +7,10 @@
  *  "Machines!" theme with heavy, metallic textures.
  *
  *  Stereo panning is used where it strengthens the battle feel: the
- *  enemy fires from the left (pan -0.5) and the player responds from
- *  the right (pan +0.5). Browser autoplay policies require a user
- *  gesture to start audio, so the first pointer event in MainScene
- *  calls unlock() to resume the underlying AudioContext.
+ *  kaiju attacks from the left (pan -0.5) and the player's mech
+ *  responds from the right (pan +0.5). Browser autoplay policies
+ *  require a user gesture to start audio, so the first pointer event
+ *  in MainScene calls unlock() to resume the underlying AudioContext.
  *
  *  A future pass may load real samples; preload() is intentionally
  *  left as a stub so the integration points in MainScene do not have

@@ -2,21 +2,21 @@
 
 **Gamedev.js Jam 2026** entry — theme **"Machines!"**
 
-A rhythm-based sequencer battle game where you read the enemy's incoming program, then input your own counter-program in time with the beat. Miss the rhythm and your slot defaults to IDLE — leaving you wide open.
+Pilot a giant combat **mech** and take down the **KAIJU (怪獣)** menace one beat at a time. Read the kaiju's incoming attack program, then counter-program your mech's response in time with the beat. Miss the rhythm and your slot defaults to IDLE — leaving you wide open.
 
 Built entirely with **Phaser 3 shapes and text** (no image assets) and a fully **procedural audio engine** built on the Web Audio API (no sample files).
 
 ## How to play
 
-1. **Reading phase** (beats 1-4): The enemy's 4-action sequence is revealed one slot per beat at BPM 60.
-2. **Programming phase** (beats 5-8): Press an action button in sync with each beat to fill your counter-sequence.
+1. **Reading phase** (beats 1-4): The kaiju's 4-action attack sequence is revealed one slot per beat at BPM 60.
+2. **Programming phase** (beats 5-8): Press an action button in sync with each beat to program your mech's counter-sequence.
    - **ATTACK** — deals damage; countered by GUARD
-   - **GUARD** — blocks enemy ATTACK; no effect otherwise
+   - **GUARD** — blocks the kaiju's ATTACK; no effect otherwise
    - **COOL** — reduces Heat by 40; vulnerable to ATTACK (double damage)
    - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
 3. **Resolution**: Actions are resolved step-by-step at BPM 120 with hit sparks, damage popups, and camera shake.
-4. **Overheat**: If your Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
-5. **Waves**: Defeat the enemy to advance. How many waves can you survive?
+4. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
+5. **Waves**: Defeat the kaiju to advance. How many waves of kaiju can your pilot survive?
 
 ### Input timing
 
@@ -79,7 +79,7 @@ public/
 ### Phases
 
 ```
-RHYTHM_ENEMY → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
+RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
 ```
 
 ### Rhythm timing
@@ -92,12 +92,12 @@ RHYTHM_ENEMY → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
 
 Rock-paper-scissors style resolution with Heat management:
 
-| Player | vs ATTACK | vs GUARD | vs IDLE / COOL |
+| Mech (Player) | vs Kaiju ATTACK | vs Kaiju GUARD | vs Kaiju IDLE / COOL |
 | --- | --- | --- | --- |
-| **ATTACK** | Clash (both -10) | Blocked (0) | Hit (enemy -20) |
+| **ATTACK** | Clash (both -10) | Blocked (0) | Hit (kaiju -20) |
 | **GUARD** | Guarded (0) | — | — |
-| **COOL** | Vulnerable (player -40) | Heat -40 | Heat -40 |
-| **SPECIAL** | Enemy -40, Heat +80 | Break (enemy -50) | Enemy -40, Heat +80 |
+| **COOL** | Vulnerable (mech -40) | Heat -40 | Heat -40 |
+| **SPECIAL** | Kaiju -40, Heat +80 | Break (kaiju -50) | Kaiju -40, Heat +80 |
 
 ### VFX (all Phaser built-in, no assets)
 
@@ -121,7 +121,7 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
 | `playOverheat()`| Dissonant square triplet (880 / 932 Hz)   | First over-heat step per turn |
 | `playDamage()` | Sine thump + LP-swept noise                | HP loss |
 
-**Stereo**: Enemy sounds pan to `-0.5` and player sounds to `+0.5` via `StereoPannerNode` (with centre fallback on unsupported browsers).
+**Stereo**: Kaiju sounds pan to `-0.5` and mech (player) sounds to `+0.5` via `StereoPannerNode` (with centre fallback on unsupported browsers).
 
 **Autoplay policy**: Browsers block audio until a user gesture, so the first pointer or key event in `MainScene` calls `audio.unlock()` which resumes the underlying `AudioContext`.
 

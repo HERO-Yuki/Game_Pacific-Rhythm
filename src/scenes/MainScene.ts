@@ -26,7 +26,7 @@ export enum ActionType {
 }
 
 enum GamePhase {
-  RHYTHM_ENEMY,
+  RHYTHM_KAIJU,
   RHYTHM_PLAYER,
   RESOLUTION,
   GAME_OVER,
@@ -40,7 +40,7 @@ const INPUT_WINDOW_MS = 200;
 const SEQ_LEN = 4;
 const TOTAL_BEATS = SEQ_LEN * 2;
 
-const HP_INIT = { player: 100, enemy: 100 } as const;
+const HP_INIT = { player: 100, kaiju: 100 } as const;
 const OVERHEAT_THRESHOLD = 100;
 const OVERHEAT_STREAK_LIMIT = 3;
 
@@ -95,7 +95,7 @@ const HEAT_DELTA = {
 
 const PAL = {
   bg: 0x0b0f14,
-  enemy: 0xcc3333,
+  kaiju: 0xcc3333,
   player: 0x3366cc,
   slotBg: 0x1a1f2e,
   slotStroke: 0x3d4663,
@@ -126,14 +126,14 @@ const ACT_SHORT: Record<ActionType, string> = {
   [ActionType.IDLE]: "IDL",
 };
 
-const ENEMY_POOL: ActionType[] = [
+const KAIJU_POOL: ActionType[] = [
   ActionType.ATTACK,
   ActionType.GUARD,
   ActionType.IDLE,
 ];
 
-/** Stereo pan for sound effects: enemy on the left, player on the right. */
-const PAN_ENEMY = -0.5;
+/** Stereo pan for sound effects: kaiju on the left, player on the right. */
+const PAN_KAIJU = -0.5;
 const PAN_PLAYER = 0.5;
 
 const FONT = "system-ui, 'Segoe UI', sans-serif";
@@ -147,9 +147,9 @@ const VFX = {
     special: [0xff44ff, 0xffcc00] as number[],
   },
   flash: {
-    enemyHit: 0xff6666,
-    enemyBlock: 0xffffff,
-    enemySpecial: 0xff44ff,
+    kaijuHit: 0xff6666,
+    kaijuBlock: 0xffffff,
+    kaijuSpecial: 0xff44ff,
     playerHit: 0xff0000,
     playerGuard: 0x66aaff,
     playerCool: 0x44cccc,
@@ -183,11 +183,11 @@ export class MainScene extends Phaser.Scene {
   /* ---------- game state ---------- */
   private playerHP = HP_INIT.player;
   private playerHeat = 0;
-  private enemyHP = HP_INIT.enemy;
+  private kaijuHP = HP_INIT.kaiju;
   private score = 0;
   private ohStreak = 0;
-  private phase = GamePhase.RHYTHM_ENEMY;
-  private enemySeq: ActionType[] = [];
+  private phase = GamePhase.RHYTHM_KAIJU;
+  private kaijuSeq: ActionType[] = [];
   private playerSeq: ActionType[] = [];
 
   /* ---------- beat-count rhythm state ---------- */
@@ -218,15 +218,15 @@ export class MainScene extends Phaser.Scene {
   private heatAlertTween?: Phaser.Tweens.Tween;
 
   /* ---------- UI refs ---------- */
-  private enemyRect!: Phaser.GameObjects.Rectangle;
+  private kaijuRect!: Phaser.GameObjects.Rectangle;
   private playerRect!: Phaser.GameObjects.Rectangle;
-  private enemyHPText!: Phaser.GameObjects.Text;
+  private kaijuHPText!: Phaser.GameObjects.Text;
   private playerHPText!: Phaser.GameObjects.Text;
   private playerHeatText!: Phaser.GameObjects.Text;
-  private enemyHPBar!: Phaser.GameObjects.Rectangle;
+  private kaijuHPBar!: Phaser.GameObjects.Rectangle;
   private playerHPBar!: Phaser.GameObjects.Rectangle;
   private playerHeatBar!: Phaser.GameObjects.Rectangle;
-  private eSlots: SlotUI[] = [];
+  private kSlots: SlotUI[] = [];
   private pSlots: SlotUI[] = [];
   private btns: BtnUI[] = [];
   private phaseLabel!: Phaser.GameObjects.Text;
@@ -296,11 +296,11 @@ export class MainScene extends Phaser.Scene {
   private resetState(): void {
     this.playerHP = HP_INIT.player;
     this.playerHeat = 0;
-    this.enemyHP = HP_INIT.enemy;
+    this.kaijuHP = HP_INIT.kaiju;
     this.score = 0;
     this.ohStreak = 0;
-    this.phase = GamePhase.RHYTHM_ENEMY;
-    this.enemySeq = [];
+    this.phase = GamePhase.RHYTHM_KAIJU;
+    this.kaijuSeq = [];
     this.playerSeq = [];
     this.rhythmStartTime = 0;
     this.lastProcessedBeat = -1;
@@ -313,7 +313,7 @@ export class MainScene extends Phaser.Scene {
 
   private isRhythmPhase(): boolean {
     return (
-      this.phase === GamePhase.RHYTHM_ENEMY ||
+      this.phase === GamePhase.RHYTHM_KAIJU ||
       this.phase === GamePhase.RHYTHM_PLAYER
     );
   }
@@ -364,28 +364,28 @@ export class MainScene extends Phaser.Scene {
     const barH = 7;
     const barGap = 14;
 
-    const ex = W * 0.25;
-    this.enemyRect = this.add.rectangle(ex, cy, sz, sz, PAL.enemy);
+    const kx = W * 0.25;
+    this.kaijuRect = this.add.rectangle(kx, cy, sz, sz, PAL.kaiju);
     this.add
-      .rectangle(ex, cy - sz / 2 - barGap, this.barMaxW, barH, 0x222222)
+      .rectangle(kx, cy - sz / 2 - barGap, this.barMaxW, barH, 0x222222)
       .setOrigin(0.5);
-    this.enemyHPBar = this.add
+    this.kaijuHPBar = this.add
       .rectangle(
-        ex - this.barMaxW / 2,
+        kx - this.barMaxW / 2,
         cy - sz / 2 - barGap,
         this.barMaxW,
         barH,
         PAL.hpGreen,
       )
       .setOrigin(0, 0.5);
-    this.enemyHPText = this.txt(
-      ex,
+    this.kaijuHPText = this.txt(
+      kx,
       cy - sz / 2 - barGap - barH,
       "",
       13,
       "#44cc44",
     ).setOrigin(0.5, 1);
-    this.txt(ex, cy + sz / 2 + 8, "ENEMY", 11, "#cc3333").setOrigin(0.5, 0);
+    this.txt(kx, cy + sz / 2 + 8, "KAIJU", 11, "#cc3333").setOrigin(0.5, 0);
 
     const px = W * 0.75;
     this.playerRect = this.add.rectangle(px, cy, sz, sz, PAL.player);
@@ -441,7 +441,7 @@ export class MainScene extends Phaser.Scene {
     this.txt(
       mid - sep - groupW / 2,
       y - this.slotSz / 2 - 18,
-      "ENEMY",
+      "KAIJU",
       11,
       "#cc3333",
     ).setOrigin(0.5, 1);
@@ -453,14 +453,14 @@ export class MainScene extends Phaser.Scene {
       "#3366cc",
     ).setOrigin(0.5, 1);
 
-    this.eSlots = [];
+    this.kSlots = [];
     this.pSlots = [];
 
     for (let i = 0; i < SEQ_LEN; i++) {
-      const esx =
+      const ksx =
         mid - sep - groupW + this.slotSz / 2 + i * (this.slotSz + gap);
       const psx = mid + sep + this.slotSz / 2 + i * (this.slotSz + gap);
-      this.txt(esx, y - this.slotSz / 2 - 4, `${i + 1}`, 9, "#4a5568").setOrigin(
+      this.txt(ksx, y - this.slotSz / 2 - 4, `${i + 1}`, 9, "#4a5568").setOrigin(
         0.5,
         1,
       );
@@ -468,7 +468,7 @@ export class MainScene extends Phaser.Scene {
         0.5,
         1,
       );
-      this.eSlots.push(this.makeSlot(esx, y, this.slotSz));
+      this.kSlots.push(this.makeSlot(ksx, y, this.slotSz));
       this.pSlots.push(this.makeSlot(psx, y, this.slotSz));
     }
 
@@ -598,7 +598,7 @@ export class MainScene extends Phaser.Scene {
   /** Builds the cached array of objects that bounce on every beat. */
   private cacheBounceTargets(): void {
     this.bounceTargets = [
-      this.enemyRect,
+      this.kaijuRect,
       this.playerRect,
       this.phaseLabel,
       this.scoreLabel,
@@ -661,8 +661,8 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   private beginWave(): void {
-    this.enemyHP = HP_INIT.enemy;
-    this.enemyRect.setAlpha(1).setScale(1);
+    this.kaijuHP = HP_INIT.kaiju;
+    this.kaijuRect.setAlpha(1).setScale(1);
     this.refreshHUD();
     this.startRhythmSequence();
   }
@@ -670,14 +670,14 @@ export class MainScene extends Phaser.Scene {
   /* ---- Rhythm phase (Foreshadow + Programming, 8 beats) ---- */
 
   private startRhythmSequence(): void {
-    this.phase = GamePhase.RHYTHM_ENEMY;
+    this.phase = GamePhase.RHYTHM_KAIJU;
     this.setPhaseDisplay("\u266a READING", "#ffcc00");
     this.clearSlots();
     this.enableButtons(false);
     this.buttonsReady = false;
 
-    this.enemySeq = Array.from({ length: SEQ_LEN }, () =>
-      Phaser.Math.RND.pick(ENEMY_POOL),
+    this.kaijuSeq = Array.from({ length: SEQ_LEN }, () =>
+      Phaser.Math.RND.pick(KAIJU_POOL),
     );
     this.playerSeq = Array.from({ length: SEQ_LEN }, () => ActionType.IDLE);
     this.rhythmEnded = false;
@@ -685,11 +685,11 @@ export class MainScene extends Phaser.Scene {
     this.rhythmStartTime = this.time.now + RHYTHM_MS;
     this.lastProcessedBeat = -1;
 
-    this.rhythmCursor.setPosition(this.eSlots[0].bg.x, this.eSlots[0].bg.y);
+    this.rhythmCursor.setPosition(this.kSlots[0].bg.x, this.kSlots[0].bg.y);
 
     console.log(
-      "[Rhythm] Enemy:",
-      this.enemySeq.map((a) => ACT_SHORT[a]).join(" "),
+      "[Rhythm] KAIJU:",
+      this.kaijuSeq.map((a) => ACT_SHORT[a]).join(" "),
     );
   }
 
@@ -702,9 +702,9 @@ export class MainScene extends Phaser.Scene {
     }
 
     if (beat < SEQ_LEN) {
-      this.revealEnemySlot(beat);
+      this.revealKaijuSlot(beat);
       this.rhythmCursor.setVisible(true);
-      this.moveCursorTo(this.eSlots[beat]);
+      this.moveCursorTo(this.kSlots[beat]);
     } else {
       const pIdx = beat - SEQ_LEN;
 
@@ -748,9 +748,9 @@ export class MainScene extends Phaser.Scene {
 
   /* ---- Rhythm helpers ---- */
 
-  private revealEnemySlot(i: number): void {
-    const action = this.enemySeq[i];
-    const s = this.eSlots[i];
+  private revealKaijuSlot(i: number): void {
+    const action = this.kaijuSeq[i];
+    const s = this.kSlots[i];
     s.bg.setFillStyle(ACT_COL[action], 0.5);
     s.border.setStrokeStyle(2, ACT_COL[action]);
     s.label.setText(ACT_SHORT[action]);
@@ -895,8 +895,8 @@ export class MainScene extends Phaser.Scene {
     this.phase = GamePhase.RESOLUTION;
     this.setPhaseDisplay("\u2694 RESOLUTION", "#ff6644");
     console.log(
-      "[Resolve] E:",
-      this.enemySeq.join(" "),
+      "[Resolve] K:",
+      this.kaijuSeq.join(" "),
       "| P:",
       this.playerSeq.join(" "),
     );
@@ -921,7 +921,7 @@ export class MainScene extends Phaser.Scene {
     this.highlightStep(i);
 
     let pAct = this.playerSeq[i];
-    const eAct = this.enemySeq[i];
+    const kAct = this.kaijuSeq[i];
 
     if (this.playerHeat >= OVERHEAT_THRESHOLD) {
       this.ohStreak++;
@@ -942,11 +942,11 @@ export class MainScene extends Phaser.Scene {
       this.ohStreak = 0;
     }
 
-    this.executeCombat(pAct, eAct, i);
+    this.executeCombat(pAct, kAct, i);
     this.playerHeat = Math.max(0, this.playerHeat);
     this.refreshHUD();
 
-    if (this.enemyHP <= 0) {
+    if (this.kaijuHP <= 0) {
       this.onWaveWin();
       return;
     }
@@ -968,55 +968,55 @@ export class MainScene extends Phaser.Scene {
 
   private executeCombat(
     pAct: ActionType,
-    eAct: ActionType,
+    kAct: ActionType,
     step: number,
   ): void {
     let msg: string;
-    const eR = this.enemyRect;
+    const kR = this.kaijuRect;
     const pR = this.playerRect;
 
     switch (pAct) {
       case ActionType.ATTACK:
         this.playerHeat += HEAT_DELTA.attack;
         audio.playAttack({ pan: PAN_PLAYER });
-        if (eAct === ActionType.ATTACK) {
-          this.enemyHP -= DMG.clash;
+        if (kAct === ActionType.ATTACK) {
+          this.kaijuHP -= DMG.clash;
           this.playerHP -= DMG.clash;
           msg = "CLASH! Both -10";
-          this.popText(eR, `-${DMG.clash}`, VFX.pop.damage);
+          this.popText(kR, `-${DMG.clash}`, VFX.pop.damage);
           this.popText(pR, `-${DMG.clash}`, VFX.pop.damage);
-          this.emitSparks((eR.x + pR.x) / 2, eR.y, VFX.spark.hit);
-          this.flash(eR, VFX.flash.enemyHit);
+          this.emitSparks((kR.x + pR.x) / 2, kR.y, VFX.spark.hit);
+          this.flash(kR, VFX.flash.kaijuHit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(120, 200);
-          audio.playAttack({ pan: PAN_ENEMY });
-          audio.playDamage({ pan: PAN_ENEMY, volume: 0.8 });
+          audio.playAttack({ pan: PAN_KAIJU });
+          audio.playDamage({ pan: PAN_KAIJU, volume: 0.8 });
           audio.playDamage({ pan: PAN_PLAYER, volume: 0.8 });
           this.applyHitStop(HITSTOP_MS.clash);
-        } else if (eAct === ActionType.GUARD) {
+        } else if (kAct === ActionType.GUARD) {
           msg = "BLOCKED!";
-          this.emitSparks(eR.x, eR.y, VFX.spark.block);
-          this.flash(eR, VFX.flash.enemyBlock);
+          this.emitSparks(kR.x, kR.y, VFX.spark.block);
+          this.flash(kR, VFX.flash.kaijuBlock);
           this.shake(30, 80);
-          audio.playGuard({ pan: PAN_ENEMY });
+          audio.playGuard({ pan: PAN_KAIJU });
         } else {
-          this.enemyHP -= DMG.attack;
-          msg = `HIT! Enemy -${DMG.attack}`;
-          this.popText(eR, `-${DMG.attack}`, VFX.pop.damage);
-          this.emitSparks(eR.x, eR.y, VFX.spark.hit);
-          this.flash(eR, VFX.flash.enemyHit);
+          this.kaijuHP -= DMG.attack;
+          msg = `HIT! KAIJU -${DMG.attack}`;
+          this.popText(kR, `-${DMG.attack}`, VFX.pop.damage);
+          this.emitSparks(kR.x, kR.y, VFX.spark.hit);
+          this.flash(kR, VFX.flash.kaijuHit);
           this.shake(60, 140);
-          audio.playDamage({ pan: PAN_ENEMY });
+          audio.playDamage({ pan: PAN_KAIJU });
         }
         break;
 
       case ActionType.GUARD:
-        if (eAct === ActionType.ATTACK) {
+        if (kAct === ActionType.ATTACK) {
           msg = "GUARDED!";
           this.emitSparks(pR.x, pR.y, VFX.spark.block);
           this.flash(pR, VFX.flash.playerGuard);
           this.shake(30, 80);
-          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playAttack({ pan: PAN_KAIJU });
           audio.playGuard({ pan: PAN_PLAYER });
         } else {
           msg = "\u2014";
@@ -1026,14 +1026,14 @@ export class MainScene extends Phaser.Scene {
       case ActionType.COOL:
         this.playerHeat += HEAT_DELTA.cool;
         audio.playCool({ pan: PAN_PLAYER });
-        if (eAct === ActionType.ATTACK) {
+        if (kAct === ActionType.ATTACK) {
           this.playerHP -= DMG.coolVulnerable;
           msg = `VULNERABLE! Player -${DMG.coolVulnerable}`;
           this.popText(pR, `-${DMG.coolVulnerable}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.crit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(180, 250);
-          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playAttack({ pan: PAN_KAIJU });
           audio.playDamage({ pan: PAN_PLAYER });
           this.applyHitStop(HITSTOP_MS.vulnerable);
         } else {
@@ -1049,33 +1049,33 @@ export class MainScene extends Phaser.Scene {
         // Hit-stop is slightly longer on a GUARD break because the
         // payoff of punching through a defence is bigger.
         const hitStopMs =
-          eAct === ActionType.GUARD ? HITSTOP_MS.break : HITSTOP_MS.special;
-        if (eAct === ActionType.GUARD) {
-          this.enemyHP -= DMG.specialVsGuard;
-          msg = `BREAK! Enemy -${DMG.specialVsGuard}`;
-          this.popText(eR, `-${DMG.specialVsGuard}`, VFX.pop.special);
+          kAct === ActionType.GUARD ? HITSTOP_MS.break : HITSTOP_MS.special;
+        if (kAct === ActionType.GUARD) {
+          this.kaijuHP -= DMG.specialVsGuard;
+          msg = `BREAK! KAIJU -${DMG.specialVsGuard}`;
+          this.popText(kR, `-${DMG.specialVsGuard}`, VFX.pop.special);
         } else {
-          this.enemyHP -= DMG.special;
-          msg = `SPECIAL! Enemy -${DMG.special}`;
-          this.popText(eR, `-${DMG.special}`, VFX.pop.special);
+          this.kaijuHP -= DMG.special;
+          msg = `SPECIAL! KAIJU -${DMG.special}`;
+          this.popText(kR, `-${DMG.special}`, VFX.pop.special);
         }
-        this.emitSparks(eR.x, eR.y, VFX.spark.special);
-        this.flash(eR, VFX.flash.enemySpecial);
+        this.emitSparks(kR.x, kR.y, VFX.spark.special);
+        this.flash(kR, VFX.flash.kaijuSpecial);
         this.shake(200, 300);
-        audio.playDamage({ pan: PAN_ENEMY });
+        audio.playDamage({ pan: PAN_KAIJU });
         this.applyHitStop(hitStopMs);
         break;
       }
 
       default:
-        if (eAct === ActionType.ATTACK) {
+        if (kAct === ActionType.ATTACK) {
           this.playerHP -= DMG.attack;
           msg = `HIT! Player -${DMG.attack}`;
           this.popText(pR, `-${DMG.attack}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.hit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(60, 140);
-          audio.playAttack({ pan: PAN_ENEMY });
+          audio.playAttack({ pan: PAN_KAIJU });
           audio.playDamage({ pan: PAN_PLAYER });
         } else {
           msg = "\u2014";
@@ -1083,7 +1083,7 @@ export class MainScene extends Phaser.Scene {
         break;
     }
 
-    console.log(`[Step ${step}] P:${pAct} vs E:${eAct} \u2192 ${msg}`);
+    console.log(`[Step ${step}] P:${pAct} vs K:${kAct} \u2192 ${msg}`);
     this.showMessage(msg);
   }
 
@@ -1099,7 +1099,7 @@ export class MainScene extends Phaser.Scene {
     console.log(`[Wave] Defeated! Score: ${this.score}`);
 
     this.tweens.add({
-      targets: this.enemyRect,
+      targets: this.kaijuRect,
       alpha: 0,
       duration: 80,
       yoyo: true,
@@ -1131,12 +1131,12 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   private refreshHUD(): void {
-    const eh = Math.max(0, this.enemyHP);
+    const eh = Math.max(0, this.kaijuHP);
     const ph = Math.max(0, this.playerHP);
     const ht = Math.max(0, this.playerHeat);
 
-    this.enemyHPText.setText(`HP ${eh}`);
-    this.enemyHPBar.displayWidth = this.barMaxW * (eh / HP_INIT.enemy);
+    this.kaijuHPText.setText(`HP ${eh}`);
+    this.kaijuHPBar.displayWidth = this.barMaxW * (eh / HP_INIT.kaiju);
 
     this.playerHPText.setText(`HP ${ph}`);
     this.playerHPBar.displayWidth = this.barMaxW * (ph / HP_INIT.player);
@@ -1195,7 +1195,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private clearSlots(): void {
-    const all = this.eSlots.concat(this.pSlots);
+    const all = this.kSlots.concat(this.pSlots);
     for (const s of all) {
       s.bg.setFillStyle(PAL.slotBg).setAlpha(1).setScale(1);
       s.border.setFillStyle();
@@ -1208,12 +1208,12 @@ export class MainScene extends Phaser.Scene {
   private highlightStep(idx: number): void {
     for (let i = 0; i < SEQ_LEN; i++) {
       const a = i === idx ? 1 : 0.3;
-      this.eSlots[i].bg.setAlpha(a);
-      this.eSlots[i].label.setAlpha(a);
+      this.kSlots[i].bg.setAlpha(a);
+      this.kSlots[i].label.setAlpha(a);
       this.pSlots[i].bg.setAlpha(a);
       this.pSlots[i].label.setAlpha(a);
     }
-    this.eSlots[idx].border.setStrokeStyle(3, PAL.highlight);
+    this.kSlots[idx].border.setStrokeStyle(3, PAL.highlight);
     this.pSlots[idx].border.setStrokeStyle(3, PAL.highlight);
   }
 
@@ -1319,7 +1319,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private flash(rect: Phaser.GameObjects.Rectangle, color: number): void {
-    const orig = rect === this.enemyRect ? PAL.enemy : PAL.player;
+    const orig = rect === this.kaijuRect ? PAL.kaiju : PAL.player;
     rect.setFillStyle(color);
     this.time.delayedCall(120, () => rect.setFillStyle(orig));
   }
