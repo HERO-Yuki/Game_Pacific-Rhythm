@@ -443,6 +443,12 @@ export class MainScene extends Phaser.Scene {
    * they tap "Submit" multiple times in rapid succession.
    */
   private scoreSubmitted = false;
+  /**
+   * Set while a connect / sign RPC is in-flight so a second click
+   * cannot queue a duplicate MetaMask popup (which some wallets
+   * report as `-32002 "request already pending"`).
+   */
+  private walletBusy = false;
   private barMaxW = 0;
 
   /* rhythm UI */
@@ -558,6 +564,7 @@ export class MainScene extends Phaser.Scene {
     this.hitStopActive = false;
     this.heatDangerActive = false;
     this.scoreSubmitted = false;
+    this.walletBusy = false;
   }
 
   private isRhythmPhase(): boolean {
@@ -1006,8 +1013,7 @@ export class MainScene extends Phaser.Scene {
       { width: 260, height: 36, color: "#a9c4ff" },
     );
     this.goWalletBtn = connectBtn;
-    // The container's label is the 2nd child (see makeMenuButton order).
-    this.goWalletBtnLabel = connectBtn.list[1] as Phaser.GameObjects.Text;
+    this.goWalletBtnLabel = this.menuButtonLabel(connectBtn);
 
     const submitBtn = this.makeMenuButton(
       W / 2,
@@ -1017,7 +1023,9 @@ export class MainScene extends Phaser.Scene {
       () => this.onSubmitScoreClick(),
       { width: 260, height: 36, color: "#ffd166" },
     );
-    submitBtn.setVisible(false).setActive(false);
+    // Hide + detach hit area so the invisible rectangle cannot
+    // eat stray pointer events while the button is not in play.
+    submitBtn.setVisible(false).disableInteractive();
     this.goSubmitBtn = submitBtn;
 
     this.goWeb3Status = this.txt(W / 2, H / 2 + 202, "", 12, "#8a95a8")
@@ -1042,6 +1050,10 @@ export class MainScene extends Phaser.Scene {
    * state and the current run's submission latch. Called whenever
    * the GO overlay is shown, and after any connect/submit RPC
    * finishes, so the UI always reflects what the user can do next.
+   *
+   * The submit button toggles both visibility AND its input hit
+   * area, so a hidden button cannot swallow a stray tap before the
+   * wallet is connected.
    */
   private refreshWeb3UI(): void {
     if (!this.goWalletBtn || !this.goWalletBtnLabel || !this.goSubmitBtn) {
@@ -1052,12 +1064,45 @@ export class MainScene extends Phaser.Scene {
       this.goWalletBtnLabel.setText(
         `\u2713 ${WalletManager.shortAddress(addr)}`,
       );
-      this.goSubmitBtn.setVisible(!this.scoreSubmitted);
-      this.goSubmitBtn.setActive(!this.scoreSubmitted);
+      if (this.scoreSubmitted) {
+        this.goSubmitBtn.setVisible(false).disableInteractive();
+      } else {
+        this.goSubmitBtn.setVisible(true);
+        this.goSubmitBtn.setInteractive(
+          new Phaser.Geom.Rectangle(
+            -(this.goSubmitBtn.width / 2),
+            -(this.goSubmitBtn.height / 2),
+            this.goSubmitBtn.width,
+            this.goSubmitBtn.height,
+          ),
+          Phaser.Geom.Rectangle.Contains,
+        );
+      }
     } else {
       this.goWalletBtnLabel.setText("[ Connect Web3 Wallet ]");
-      this.goSubmitBtn.setVisible(false);
-      this.goSubmitBtn.setActive(false);
+      this.goSubmitBtn.setVisible(false).disableInteractive();
+    }
+  }
+
+  /**
+   * Seed the status line with a helpful hint the first time the
+   * overlay appears this run: explain that no wallet was detected
+   * (so the connect button's failure isn't surprising), or note the
+   * already-signed state on a restart of the same browser session.
+   * Idempotent — runs every time the overlay is shown, but only
+   * writes to an empty status so active messages are preserved.
+   */
+  private primeWeb3StatusLine(): void {
+    if (!this.goWeb3Status) return;
+    if (this.goWeb3Status.text.length > 0) return;
+    if (!wallet.isProviderAvailable()) {
+      this.setWeb3Status(
+        "No Ethereum wallet detected \u2014 scores can still be saved locally.",
+      );
+      return;
+    }
+    if (this.scoreSubmitted) {
+      this.setWeb3Status("Score already signed for this run.");
     }
   }
 
@@ -1075,35 +1120,40 @@ export class MainScene extends Phaser.Scene {
   /**
    * Handler for the [ Connect Web3 Wallet ] button. Idempotent: if
    * the wallet is already connected, just re-syncs the UI instead of
-   * re-prompting the user.
+   * re-prompting the user. The `walletBusy` latch prevents rapid
+   * re-taps from queuing duplicate `eth_requestAccounts` calls while
+   * the first popup is still open.
    */
   private async onConnectWalletClick(): Promise<void> {
+    if (this.walletBusy) return;
     if (wallet.getAddress()) {
       this.refreshWeb3UI();
       return;
     }
+    this.walletBusy = true;
     this.setWeb3Status("Opening wallet\u2026");
-    const result = await wallet.connectWallet();
-    if (result.ok) {
-      this.setWeb3Status(
-        `Wallet connected: ${WalletManager.shortAddress(result.data.address)}`,
-      );
-    } else if (result.code === "no-provider") {
-      this.setWeb3Status(
-        "No Ethereum wallet detected. Install MetaMask to submit.",
-        "error",
-      );
-      console.warn("[Web3] connect failed:", result.message);
-    } else if (result.code === "user-rejected") {
-      this.setWeb3Status("Connection cancelled.", "error");
-    } else {
-      this.setWeb3Status(
-        "Wallet connection failed. See console for details.",
-        "error",
-      );
-      console.warn("[Web3] connect failed:", result.message);
+    try {
+      const result = await wallet.connectWallet();
+      if (result.ok) {
+        this.setWeb3Status(
+          `Wallet connected: ${WalletManager.shortAddress(result.data.address)}`,
+        );
+      } else if (result.code === "no-provider") {
+        this.setWeb3Status(
+          "No Ethereum wallet detected. Install MetaMask to submit.",
+          "error",
+        );
+        console.warn("[Web3] connect failed:", result.message);
+      } else if (result.code === "user-rejected") {
+        this.setWeb3Status("Connection cancelled.", "error");
+      } else {
+        this.setWeb3Status(result.message, "error");
+        console.warn("[Web3] connect failed:", result.message);
+      }
+    } finally {
+      this.walletBusy = false;
+      this.refreshWeb3UI();
     }
-    this.refreshWeb3UI();
   }
 
   /**
@@ -1113,35 +1163,37 @@ export class MainScene extends Phaser.Scene {
    * future on-chain leaderboard contract.
    */
   private async onSubmitScoreClick(): Promise<void> {
-    if (this.scoreSubmitted) return;
+    if (this.walletBusy || this.scoreSubmitted) return;
     const addr = wallet.getAddress();
     if (!addr) {
       this.setWeb3Status("Connect a wallet first.", "error");
       return;
     }
+    this.walletBusy = true;
     this.setWeb3Status("Awaiting signature\u2026");
-    const result = await wallet.submitScore(this.score, addr);
-    if (result.ok) {
-      this.scoreSubmitted = true;
-      this.setWeb3Status(
-        `Signed at ${new Date().toLocaleTimeString()} \u00B7 ${result.data.signature.slice(
-          0,
-          10,
-        )}\u2026`,
-      );
-      this.showScoreSubmittedPopup();
-      console.log("[Web3] score signature:", result.data.signature);
-      console.log("[Web3] signed message:", result.data.message);
-    } else if (result.code === "user-rejected") {
-      this.setWeb3Status("Signature cancelled.", "error");
-    } else {
-      this.setWeb3Status(
-        "Signature failed. See console for details.",
-        "error",
-      );
-      console.warn("[Web3] sign failed:", result.message);
+    try {
+      const result = await wallet.submitScore(this.score, addr);
+      if (result.ok) {
+        this.scoreSubmitted = true;
+        this.setWeb3Status(
+          `Signed at ${new Date().toLocaleTimeString()} \u00B7 ${result.data.signature.slice(
+            0,
+            10,
+          )}\u2026`,
+        );
+        this.showScoreSubmittedPopup();
+        console.log("[Web3] score signature:", result.data.signature);
+        console.log("[Web3] signed message:", result.data.message);
+      } else if (result.code === "user-rejected") {
+        this.setWeb3Status("Signature cancelled.", "error");
+      } else {
+        this.setWeb3Status(result.message, "error");
+        console.warn("[Web3] sign failed:", result.message);
+      }
+    } finally {
+      this.walletBusy = false;
+      this.refreshWeb3UI();
     }
-    this.refreshWeb3UI();
   }
 
   /**
@@ -1185,6 +1237,10 @@ export class MainScene extends Phaser.Scene {
    * Compact "menu" button (used by the game-over overlay). Uses the
    * same press/release tween language as the combat buttons so the
    * whole game feels consistent at every layer.
+   *
+   * The label `Text` is attached via `setData("label", lbl)` so
+   * callers can later mutate it through {@link menuButtonLabel} —
+   * without relying on fragile `container.list[...]` index access.
    */
   private makeMenuButton(
     x: number,
@@ -1204,6 +1260,7 @@ export class MainScene extends Phaser.Scene {
     );
     const ctr = this.add.container(x, y, [bg, lbl]);
     ctr.setSize(bw, bh);
+    ctr.setData("label", lbl);
     ctr.setInteractive(
       new Phaser.Geom.Rectangle(-bw / 2, -bh / 2, bw, bh),
       Phaser.Geom.Rectangle.Contains,
@@ -1218,6 +1275,18 @@ export class MainScene extends Phaser.Scene {
       onClick();
     });
     return ctr;
+  }
+
+  /**
+   * Typed accessor for the label `Text` attached to a menu button.
+   * Centralises the `getData("label")` cast so scene code never has
+   * to sprinkle `as Phaser.GameObjects.Text` at call sites.
+   */
+  private menuButtonLabel(
+    btn: Phaser.GameObjects.Container,
+  ): Phaser.GameObjects.Text | undefined {
+    const v = btn.getData("label") as unknown;
+    return v instanceof Phaser.GameObjects.Text ? v : undefined;
   }
 
   /**
@@ -2176,6 +2245,7 @@ export class MainScene extends Phaser.Scene {
     // overlay fades in (handles the "already connected from previous
     // run" case where we can skip straight to the submit button).
     this.refreshWeb3UI();
+    this.primeWeb3StatusLine();
     this.goLayer.setVisible(true).setAlpha(0);
     this.tweens.add({ targets: this.goLayer, alpha: 1, duration: 600 });
   }

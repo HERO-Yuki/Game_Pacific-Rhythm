@@ -73,16 +73,10 @@ export class WalletManager {
    * skip re-prompting across scene restarts.
    */
   async connectWallet(): Promise<WalletResult<ConnectPayload>> {
-    if (!this.isProviderAvailable() || !window.ethereum?.request) {
-      return {
-        ok: false,
-        code: "no-provider",
-        message:
-          "No Ethereum wallet detected. Install MetaMask to submit scores.",
-      };
-    }
+    const guard = this.requireProvider();
+    if (!guard.ok) return guard;
     try {
-      const accounts = (await window.ethereum.request({
+      const accounts = (await guard.provider.request!({
         method: "eth_requestAccounts",
       })) as string[];
       if (!Array.isArray(accounts) || accounts.length === 0) {
@@ -113,16 +107,11 @@ export class WalletManager {
     score: number,
     address: HexAddress,
   ): Promise<WalletResult<SubmitPayload>> {
-    if (!this.isProviderAvailable() || !window.ethereum?.request) {
-      return {
-        ok: false,
-        code: "no-provider",
-        message: "No Ethereum wallet detected.",
-      };
-    }
+    const guard = this.requireProvider();
+    if (!guard.ok) return guard;
     const message = this.buildScoreMessage(score, address);
     try {
-      const signature = (await window.ethereum.request({
+      const signature = (await guard.provider.request!({
         method: "personal_sign",
         params: [message, address],
       })) as string;
@@ -137,6 +126,27 @@ export class WalletManager {
     } catch (err) {
       return this.interpretError(err);
     }
+  }
+
+  /**
+   * Shared pre-flight for every RPC. Returns either a narrowed
+   * provider handle (when the EIP-1193 injection is usable) or a
+   * ready-to-return `WalletErr` with `code: "no-provider"` — so
+   * callers can early-out with one line instead of repeating the
+   * `typeof window` dance twice.
+   */
+  private requireProvider():
+    | { ok: true; provider: NonNullable<Window["ethereum"]> }
+    | WalletErr {
+    if (!this.isProviderAvailable() || !window.ethereum?.request) {
+      return {
+        ok: false,
+        code: "no-provider",
+        message:
+          "No Ethereum wallet detected. Install MetaMask to submit scores.",
+      };
+    }
+    return { ok: true, provider: window.ethereum };
   }
 
   /**
@@ -169,8 +179,13 @@ export class WalletManager {
 
   /**
    * Map a provider exception to our discriminated error union.
-   * EIP-1193 uses numeric code 4001 for user rejection; some older
-   * wallets emit the string variant, so we accept both.
+   *
+   * EIP-1193 rejection is code `4001`; some older wallets emit the
+   * string variant `ACTION_REJECTED`. `-32002` is MetaMask's
+   * "a request is already pending" — raised when the popup is
+   * already open and the user taps our button again. We surface it
+   * as a distinct, friendlier message so the overlay can tell the
+   * user to look at the wallet popup rather than re-clicking.
    */
   private interpretError(err: unknown): WalletErr {
     const e = err as { code?: number | string; message?: string };
@@ -179,6 +194,14 @@ export class WalletManager {
         ok: false,
         code: "user-rejected",
         message: "Wallet request rejected.",
+      };
+    }
+    if (e?.code === -32002) {
+      return {
+        ok: false,
+        code: "unknown",
+        message:
+          "A wallet request is already pending. Check your wallet popup.",
       };
     }
     return {
