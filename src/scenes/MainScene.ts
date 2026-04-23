@@ -64,7 +64,7 @@ const HP_INIT = { player: 100 } as const;
  * without touching the wave-flow code; Phase 6 will split this into
  * `src/config/enemies.ts` so non-coders can iterate on balance.
  */
-type KaijuRank = "zako" | "boss";
+type KaijuRank = "zako" | "boss" | "giga";
 
 interface KaijuRankStats {
   readonly texture: string;
@@ -89,10 +89,24 @@ const KAIJU_STATS: Readonly<Record<KaijuRank, KaijuRankStats>> = {
     label: "BOSS",
     labelColor: "#ff4444",
   },
+  giga: {
+    texture: "kaiju-giga",
+    hp: 280,
+    scaleMul: 1.38,
+    label: "GIGA",
+    labelColor: "#ff2a8a",
+  },
 } as const;
 
-/** Ordinary waves; every Nth wave swaps to a boss rank. */
+/**
+ * Rank cadence:
+ *  - Every `BOSS_EVERY` waves → boss (3, 6, 9, …)
+ *  - Every `GIGA_EVERY` waves → giga overrides boss (9, 18, 27, …)
+ *  - Everything else → zako
+ * Keep GIGA_EVERY as a multiple of BOSS_EVERY to preserve the rhythm.
+ */
 const BOSS_EVERY = 3;
+const GIGA_EVERY = 9;
 const OVERHEAT_THRESHOLD = 100;
 const OVERHEAT_STREAK_LIMIT = 3;
 
@@ -777,14 +791,20 @@ export class MainScene extends Phaser.Scene {
 
   private beginWave(): void {
     this.wave += 1;
-    const rank: KaijuRank =
-      this.wave % BOSS_EVERY === 0 ? "boss" : "zako";
+    const rank = this.pickKaijuRank(this.wave);
     this.applyKaijuRank(rank);
     this.refreshHUD();
     console.log(
       `[Wave ${this.wave}] ${rank.toUpperCase()} — HP ${this.kaijuHP}`,
     );
     this.startRhythmSequence();
+  }
+
+  /** Map a 1-based wave index to its kaiju rank (giga > boss > zako). */
+  private pickKaijuRank(wave: number): KaijuRank {
+    if (wave % GIGA_EVERY === 0) return "giga";
+    if (wave % BOSS_EVERY === 0) return "boss";
+    return "zako";
   }
 
   /**

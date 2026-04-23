@@ -19,8 +19,9 @@ export class PreloaderScene extends Phaser.Scene {
     this.load.image("mech-player", "assets/images/mech-player.png");
     this.load.image("kaiju-zako", "assets/images/kaiju-zako.png");
     this.load.image("kaiju-boss", "assets/images/kaiju-boss.png");
+    this.load.image("kaiju-giga", "assets/images/kaiju-giga.png");
 
-    // Future: JSON levels, audio banks, giga kaiju variants, etc.
+    // Future: JSON levels, audio banks, extra rank variants, etc.
   }
 
   create(): void {

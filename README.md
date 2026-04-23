@@ -16,7 +16,7 @@ Built with **Phaser 3 shapes and text** plus a pair of bespoke Midjourney flat-v
    - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
 3. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
 4. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
-5. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends out a larger, higher-HP **BOSS** kaiju — brace yourself. How many waves of kaiju can your pilot survive?
+5. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. How many waves can your pilot survive?
 
 ### Input timing
 
@@ -76,6 +76,7 @@ public/
       mech-player.png    # Player mech — Midjourney (flat vector style)
       kaiju-zako.png     # Zako kaiju — Midjourney (flat vector style)
       kaiju-boss.png     # Boss kaiju — appears every 3rd wave
+      kaiju-giga.png     # Giga kaiju — appears every 9th wave
     audio/               # Reserved for future sample banks
     fonts/               # Reserved for webfont fallbacks
 ```
@@ -96,14 +97,15 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
 
 ### Kaiju ranks
 
-Waves cycle between two ranks driven by the `KAIJU_STATS` config in `MainScene.ts`:
+Waves cycle between three ranks driven by the `KAIJU_STATS` config in `MainScene.ts` and picked by `pickKaijuRank(wave)` (giga > boss > zako):
 
 | Rank | Frequency | Texture | HP | Scale |
 | --- | --- | --- | --- | --- |
 | `zako` | Default | `kaiju-zako` | 100 | 1.0× |
-| `boss` | Every `BOSS_EVERY = 3` waves (3, 6, 9…) | `kaiju-boss` | 180 | 1.18× |
+| `boss` | Every `BOSS_EVERY = 3` waves (3, 6, 12, 15…) | `kaiju-boss` | 180 | 1.18× |
+| `giga` | Every `GIGA_EVERY = 9` waves (9, 18, 27…) — overrides boss | `kaiju-giga` | 280 | 1.38× |
 
-`applyKaijuRank()` swaps the body's texture, display size, and HP bar denominator in one place, so adding a `giga` tier in Phase 6 only means adding a row to `KAIJU_STATS`.
+`applyKaijuRank()` swaps the body's texture, display size, and HP-bar denominator in one place, so tuning difficulty or adding a new rank only touches this config.
 
 ### Combat system
 
