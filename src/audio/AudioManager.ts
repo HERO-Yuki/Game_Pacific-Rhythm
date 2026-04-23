@@ -22,6 +22,11 @@ export interface PlayOptions {
   pan?: number;
   /** Per-call volume multiplier (0..1). Defaults to 1. */
   volume?: number;
+  /**
+   * `playBeat()` only: multiplies the thump’s start / end pitch for a
+   * brighter metronome (e.g. emergency mode tension).
+   */
+  pitchMul?: number;
 }
 
 type WebkitWindow = Window & {
@@ -107,11 +112,12 @@ export class AudioManager {
     const s = this.beginSfx(opts);
     if (!s) return;
     const { ctx, sink, now } = s;
+    const m = Math.max(0.7, Math.min(1.45, opts.pitchMul ?? 1));
 
     const osc = ctx.createOscillator();
     osc.type = "sine";
-    osc.frequency.setValueAtTime(95, now);
-    osc.frequency.exponentialRampToValueAtTime(42, now + 0.16);
+    osc.frequency.setValueAtTime(95 * m, now);
+    osc.frequency.exponentialRampToValueAtTime(42 * m, now + 0.16);
 
     const env = ctx.createGain();
     scheduleAR(env.gain, now, 0.75, 0.006, 0.274);

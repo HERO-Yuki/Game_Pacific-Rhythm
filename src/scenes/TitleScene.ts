@@ -6,7 +6,6 @@ import {
   type Difficulty,
 } from "../config/difficulty";
 import { audio } from "../audio/AudioManager";
-import { formatBestSummary } from "../utils/records";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 
 /* ===================================================================
@@ -230,14 +229,35 @@ export class TitleScene extends Phaser.Scene {
       ease: "Sine.easeInOut",
     });
 
-    // Sub-title
-    this.add
-      .text(W / 2, 116, "ROBOT vs KAIJU", {
-        fontFamily: FONT_UI,
-        fontSize: "13px",
-        color: "#334055",
+    // Sub-title — high contrast + ADD glow (same idea as the main title)
+    const subY = 110;
+    const subGlow: ReadonlyArray<{ scale: number; alpha: number }> = [
+      { scale: 1.12, alpha: 0.14 },
+      { scale: 1.04, alpha: 0.22 },
+    ];
+    for (const g of subGlow) {
+      this.add
+        .text(W / 2, subY, "ROBOT vs KAIJU", {
+          fontFamily: FONT_DELA,
+          fontSize: "22px",
+          color: "#ff7744",
+        })
+        .setOrigin(0.5, 0)
+        .setScale(g.scale)
+        .setAlpha(g.alpha)
+        .setBlendMode(Phaser.BlendModes.ADD);
+    }
+    const subTitle = this.add
+      .text(W / 2, subY, "ROBOT vs KAIJU", {
+        fontFamily: FONT_DELA,
+        fontSize: "22px",
+        color: "#e8f0f8",
+        stroke: "#0b0f14",
+        strokeThickness: 5,
       })
-      .setOrigin(0.5, 0);
+      .setOrigin(0.5, 0)
+      .setShadow(0, 2, "#000000", 8, true, true);
+    this.delaGothicTexts.push(subTitle);
   }
 
   // ================================================================
@@ -311,15 +331,19 @@ export class TitleScene extends Phaser.Scene {
       DIFFICULTY_ORDER.length * btnW + (DIFFICULTY_ORDER.length - 1) * gap;
     const startCX = W / 2 - totalW / 2 + btnW / 2;
 
-    // "SELECT DIFFICULTY" micro-label above the pills
+    // Section label above the difficulty pills
     const modeLabel = this.add
-      .text(W / 2, selectorY - 24, "SELECT DIFFICULTY", {
-        fontFamily: FONT_MONO,
-        fontSize: "9px",
-        color: "#3a4050",
+      .text(W / 2, selectorY - 30, "SELECT DIFFICULTY", {
+        fontFamily: FONT_DELA,
+        fontSize: "15px",
+        color: "#c8d8f0",
+        stroke: "#0b0f14",
+        strokeThickness: 4,
       })
       .setOrigin(0.5, 1)
-      .setAlpha(0);
+      .setAlpha(0)
+      .setShadow(0, 2, "#000000", 6, true, true);
+    this.delaGothicTexts.push(modeLabel);
 
     this.time.delayedCall(UI_REVEAL_DELAY_MS, () => {
       if (modeLabel.active) {
@@ -338,7 +362,7 @@ export class TitleScene extends Phaser.Scene {
         .setStrokeStyle(1, 0x3d4663);
 
       const labelTxt = this.add
-        .text(0, -5, cfg.label, {
+        .text(0, 0, cfg.label, {
           fontFamily: FONT_DELA,
           fontSize: "15px",
           color: "#e6edf3",
@@ -346,16 +370,8 @@ export class TitleScene extends Phaser.Scene {
         .setOrigin(0.5, 0.5);
       this.delaGothicTexts.push(labelTxt);
 
-      const bestTxt = this.add
-        .text(0, 11, formatBestSummary(diff), {
-          fontFamily: FONT_UI,
-          fontSize: "9px",
-          color: "#3d4663",
-        })
-        .setOrigin(0.5, 0);
-
       const ctr = this.add
-        .container(cx, selectorY, [bg, labelTxt, bestTxt])
+        .container(cx, selectorY, [bg, labelTxt])
         .setSize(btnW, btnH)
         .setAlpha(0);
 

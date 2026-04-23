@@ -21,8 +21,8 @@ Pacific Rhythm is a **rhythm-driven mech-vs-kaiju** duel. Every encounter is a f
 
 Built with **Phaser 3 shapes and text**, a pair of bespoke Midjourney flat-vector illustrations, and a fully **procedural audio engine** on the Web Audio API (no sample files ship with the build).
 
-- **Rhythm-based combat** — all input is beat-gated with a ±200 ms window
-- **Three difficulty tiers** — EASY (5 phases, no weather), NORMAL (7 phases, weather on), ENDLESS (unlimited, best-score chase, **tempo ramps +2 BPM per phase** after phase 0)
+- **Rhythm-based combat** — all input is beat-gated with a ±200 ms window; **PERFECT** (≤100 ms from beat centre) trims Heat by 5 and triggers extra juice
+- **Three difficulty tiers** — EASY (**9 waves / 9 kaiju**, no weather), NORMAL (**15 waves**, weather on), ENDLESS (unlimited, **tempo ramps +2 BPM per phase** after phase 0)
 - **Procedural audio** — every SFX, beat, and hiss is synthesised at runtime from oscillators + a shared noise buffer
 - **Fully responsive** — `Phaser.Scale.FIT` on a 960×540 canvas; runs identically on desktop, mobile, YouTube Playables, and Wavedash iframes
 - **Keyboard + touch parity** — WASD / arrow keys are first-class, button hit-zones are thumb-friendly
@@ -58,45 +58,49 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 - **Live wallet flow on GAME OVER** — the game-over overlay now ships a two-step Ethereum attestation UX built entirely on the vanilla EIP-1193 `window.ethereum` API (no `ethers` / `viem` / `wagmi` added to the bundle). `[ Connect Web3 Wallet ]` calls `eth_requestAccounts`, then `[ Submit Score to Ethereum ]` requests a `personal_sign` over a human-readable run summary (score + timestamp + address). The returned signature is logged and a gold "Score Submitted!" pop celebrates the attestation. See [`src/web3/WalletManager.ts`](src/web3/WalletManager.ts) — every RPC call is wrapped in a discriminated-union `WalletResult<T>` so rejection (EIP-1193 `4001`) is distinguished from "no provider installed", "request already pending" (`-32002`), and unknown failures. A `walletBusy` latch in `MainScene` prevents rapid re-taps from queuing duplicate wallet popups while the first one is open.
 - **Gas-free, verifiable foundation** — `personal_sign` produces a signature that any future leaderboard contract can validate via `ecrecover`. No transaction is broadcast, no network is required, and the player pays no gas. This is exactly the "first step to on-chain score recording" the challenge asks for: the authentication primitive is already live.
 - **Provider detection + pre-existing stubs** remain available for richer flows — `getEthereumReadiness()`, `connectWalletPlaceholder()`, `sendTransactionPlaceholder()` are re-exported from [`src/web3/index.ts`](src/web3/index.ts) alongside the new `wallet` singleton.
-- **On-chain score schema foundation** — the title-screen's best-record layer ([`src/utils/records.ts`](src/utils/records.ts)) writes under a single versioned key (`pacificRhythm:bestRecords:v1`) with a schema designed to map cleanly onto a leaderboard contract: `EndlessRecord { waves, bosses, gigas }` for ENDLESS, `TimedClearRecord { timeMs }` for EASY / NORMAL. Swapping the `localStorage` backend for an on-chain read/write is a one-file change.
+- **On-chain attestation (optional)** — the game-over flow can `personal_sign` a human-readable run summary (waves + time) for a future contract; the build does not persist a local “best time” or endless high score.
 
 ### Open Source by GitHub
 
 - **MIT licensed** (see `LICENSE`) — permissive for forks, remixes, and educational use.
-- **Clean TypeScript architecture** — strict mode, explicit types at every public surface, config and runtime logic separated (`src/config/{difficulty,enemies,weather}.ts` are pure data + pure functions, so designers can tune balance without touching scene code).
+- **Clean TypeScript architecture** — strict mode, explicit types at every public surface, config and runtime logic separated. [`src/config/difficulty.ts`](src/config/difficulty.ts), [`enemies.ts`](src/config/enemies.ts), [`weather.ts`](src/config/weather.ts), and [`rhythmAndEmergency.ts`](src/config/rhythmAndEmergency.ts) hold tunables and pure helpers (rhythm quality windows, emergency HP, SPECIAL heat in crisis, etc.) so balance passes rarely need to touch `MainScene` line-by-line.
 - **Readable commit history** — every feature arrived as a single-purpose commit with a narrative message, making the repo double as a "how we built it" walkthrough.
 
 ---
 
 ## How to play
 
-1. **Pick a difficulty** on the title screen — EASY, NORMAL, or ENDLESS (arrow keys / A–D move the selection; **ENGAGE** starts the run). The selection drives run length, whether the weather system is active, and which best-record field the end-of-run celebration writes to.
-2. **Reading phase** (beats 1–4): The kaiju's 4-action attack sequence is revealed one slot per beat. EASY and NORMAL stay at **60 BPM** (1000 ms per beat). **ENDLESS** starts at 60 BPM and **adds +2 BPM each weather phase** (each block of `BOSS_EVERY` waves — see `phaseIndexForWave` in [`src/config/difficulty.ts`](src/config/difficulty.ts)); effective BPM is capped by `ENDLESS_BPM_MAX`.
+1. **Pick a difficulty** on the title screen — EASY, NORMAL, or ENDLESS (arrow keys / A–D move the selection; **ENGAGE** starts the run). The selection drives run length and whether the weather system is active.
+2. **Reading phase** (beats 1–4): The kaiju's 4-action attack sequence is revealed one slot per beat. **NORMAL** and **ENDLESS (wave 1)** use **60 BPM** (1000 ms per beat). **EASY** is slower — **48 BPM** (1250 ms) for learning. **ENDLESS** then **adds +2 BPM each weather phase** (each block of `BOSS_EVERY` waves — see `phaseIndexForWave` in [`src/config/difficulty.ts`](src/config/difficulty.ts)); effective BPM is capped by `ENDLESS_BPM_MAX`.
 3. **Programming phase** (beats 5–8): Press an action button in sync with each beat to program your mech's counter-sequence.
    - **ATTACK** — deals damage; countered by GUARD
    - **GUARD** — blocks the kaiju's ATTACK; no effect otherwise
    - **COOL** — reduces Heat by 40; vulnerable to ATTACK (double damage)
-   - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
+   - **SPECIAL** — massive damage + pierces GUARD; adds **+80 Heat** (see **Emergency mode** below for a half-cost variant)
 4. **Resolution**: Eight ticks per turn at `resolveMs` (in this build **equal to** `rhythmMs`, so the same wall-clock beat length as the rhythm phase). Even ticks: kaiju _telegraph_; odd ticks: your action resolves. Four steps × two ticks = eight ticks, call-and-response.
 5. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
-6. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. EASY ends at wave 15, NORMAL at wave 21, ENDLESS never ends.
-7. **Weather** (NORMAL / ENDLESS only): Every 3-wave phase (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK −25 % / COOL +50 %), `SAND` (one kaiju slot masked as `[ ??? ]`), or `DROUGHT` (Heat gain +50 %). EASY disables the system entirely so learners only have to read the rhythm.
+6. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. **EASY** clears after **9** waves, **NORMAL** after **15**, ENDLESS never ends.
+7. **Boss finisher**: Against a **BOSS** rank only, non-SPECIAL damage cannot drop the kaiju below **1 HP** — you must land **SPECIAL** to finish. The UI highlights the SPECIAL button and shows a short English prompt when the boss is at 1 HP.
+8. **Emergency mode** (player **HP ≤ 30**): A full-screen radial vignette + red stress flash, a persistent **EMERGENCY: COOLING SYSTEM BYPASS ACTIVE** banner, slightly **higher-pitched** beat clicks, and **SPECIAL Heat gain halved** (+40 instead of +80). Stacks visually with the existing Heat-danger vignette when both apply.
+9. **Weather** (NORMAL / ENDLESS only): Every 3-wave phase (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK −25 % / COOL +50 %), `SAND` (one kaiju slot masked as `[ ??? ]`), or `DROUGHT` (Heat gain +50 %). EASY disables the system entirely so learners only have to read the rhythm.
 
 ### Difficulty
 
-| Difficulty | Phases | Waves | Weather | Best-record metric |
-| --- | --- | --- | --- | --- |
-| **EASY**    | 5         | 15        | disabled (always CLEAR) | Fastest clear time |
-| **NORMAL**  | 7         | 21        | enabled                 | Fastest clear time |
-| **ENDLESS** | unlimited | unlimited | enabled                 | Highest waves / bosses / gigas |
+| Difficulty | Phases (design) | Waves to **GAME CLEAR** | Weather |
+| --- | --- | --- | --- |
+| **EASY**    | 1         | **9** (`maxWaves: 9`)  | disabled (always CLEAR) |
+| **NORMAL**  | 2         | **15** (`maxWaves: 15`) | enabled                 |
+| **ENDLESS** | unlimited | unlimited (no clear)  | enabled                 |
+
+EASY and NORMAL set explicit **`maxWaves`** in [`src/config/difficulty.ts`](src/config/difficulty.ts) so run length does not have to equal `phases × BOSS_EVERY` (3).
 
 ENDLESS **runaway tempo**: at the start of each wave, `MainScene` sets `rhythmMs` / `resolveMs` via `beatMsForEndlessWave(wave)` so reading, programming, and resolution all track the same accelerating clock. Phase boundaries match weather (`phaseIndexForWave`).
 
-Records live under `localStorage` (`pacificRhythm:bestRecords:v1`) and are summarized on the title screen after a run. Each field is tracked independently for ENDLESS, so a long run with fewer bosses defeated does not overwrite a shorter run that bagged more bosses. EASY / NORMAL record the fastest completion time.
+The game does not save local high scores or best times; each run is self-contained.
 
 ### Input timing
 
-Each player beat has a **±200 ms** input window. Press within the window to register your action; miss it and the slot becomes IDLE (unprotected). Timing quality is logged as PERFECT / GOOD / OK.
+Each player beat (programming phase, slots 0–3) has a **±200 ms** input window. Press within the window to register your action; miss it and the slot becomes **MISS** / IDLE. Within the window, **|now − beat centre| ≤ 100 ms** counts as **PERFECT** (instant **−5 Heat**, gold VFX, layered `playSpecial` cue); wider hits in-window are **GOOD** (lighter VFX, no extra Heat). Values live in [`src/config/rhythmAndEmergency.ts`](src/config/rhythmAndEmergency.ts).
 
 ### Controls
 
@@ -124,7 +128,7 @@ When an action lands in the 4-slot programme, the slot's border snaps to pure wh
 - **Bundler:** Vite 6
 - **Node:** 20+ recommended
 - **Audio:** Web Audio API (procedural, no samples)
-- **Persistence:** `localStorage` (versioned schema ready to migrate on-chain)
+- **Persistence:** none (no local best-score table); Web3 `personal_sign` is optional for a signed run summary
 
 ---
 
@@ -172,7 +176,7 @@ The net effect: AI tools let us spend our 10 days on the _interesting_ work — 
 RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER)
 ```
 
-`GAME_CLEAR` fires only when the wave counter reaches the difficulty's cap (EASY 15 / NORMAL 21); ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
+`GAME_CLEAR` fires when the wave counter reaches the difficulty cap (**EASY 9** / **NORMAL 15**); a short celebration overlay then returns to the title. ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
 
 ### ENDLESS tempo
 
@@ -182,7 +186,7 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER
 
 ### Title screen (`TitleScene.ts`)
 
-- **Mech OS boot** — full-screen background, dim `mech-player` silhouette, terminal boot log, staggered difficulty pills, then **[ ENGAGE ]** with a 60 BPM timer pulse (uses `DIFFICULTY_CONFIGS.normal.beatMs` so the menu matches the default combat tempo). **[ENGAGE]** / Space / Enter runs a short VFX (shake, flash) and hands off to `MainScene`.
+- **Mech OS boot** — full-screen background, dim `mech-player` silhouette, **PACIFIC RHYTHM** title with a phosphor-style glow, high-contrast **ROBOT vs KAIJU** subtitle, terminal boot log, **SELECT DIFFICULTY** label, staggered difficulty pills, then **[ ENGAGE ]** with a 60 BPM timer pulse (uses `DIFFICULTY_CONFIGS.normal.beatMs` so the menu matches NORMAL combat tempo). **[ENGAGE]** / Space / Enter runs a short VFX (shake, flash) and hands off to `MainScene`.
 
 ### Rhythm timing
 
@@ -197,8 +201,8 @@ Waves cycle between three ranks. All the tunables live in [`src/config/enemies.t
 | Rank | Frequency | Texture | HP | Scale |
 | --- | --- | --- | --- | --- |
 | `zako` | Default | `kaiju-zako` | 100 | 1.0× |
-| `boss` | Every 3rd wave **except** 9, 18, 27… (giga takes those) | `kaiju-boss` | 180 | 1.18× |
-| `giga` | Every 9th wave (9, 18, 27…) | `kaiju-giga` | 280 | 1.38× |
+| `boss` | Every 3rd wave **except** 9, 18, 27… (giga takes those) | `kaiju-boss` | 180 | 1.4× |
+| `giga` | Every 9th wave (9, 18, 27…) | `kaiju-giga` | 280 | 1.65× |
 
 `pickKaijuRank(wave)` (pure, tested by inspection) maps a 1-based wave index to a rank using giga > boss > zako priority. `MainScene.applyKaijuRank()` then swaps the body's texture, display size, HP budget, and name label in one place.
 
@@ -218,7 +222,7 @@ Weather is a _phase-scoped_ modifier bundled in [`src/config/weather.ts`](src/co
 - **Heat gain** multiplies every positive Heat delta (ATTACK wind-up and SPECIAL charge).
 - **Sand mask** hides one random kaiju reveal slot as `[ ??? ]` during Reading; `telegraphKaiju()` unmasks it right before it resolves so the player still learns from the outcome.
 
-On top of the weather-driven sand mask there is a **baseline fog-of-war** rule: once `wave >= KAIJU_BASELINE_NOISE_WAVE` (3) every kaiju reveal slot independently rolls `KAIJU_BASELINE_NOISE_CHANCE` (20 %) of being masked. Both noise sources OR together into a single `kaijuNoiseMask: boolean[]` so the rendering path has one predicate to check, and the console log at wave start prints the masked indices for quick balance debugging.
+On top of the weather-driven sand mask there is a **baseline fog-of-war** rule: once `wave >= KAIJU_BASELINE_NOISE_WAVE` (3) every kaiju reveal slot independently rolls `KAIJU_BASELINE_NOISE_CHANCE` (20 %) of being masked. Both noise sources are OR-ed into a working mask, then **capped to at most two** `[ ??? ]` slots at a time (sand’s pick is kept when the OR would exceed that cap; remaining slots are chosen at random). The final `kaijuNoiseMask: boolean[]` is what the renderer checks, and the console log at wave start prints the masked indices for quick balance debugging.
 
 The multiplications themselves live in `src/config/weather.ts` as three pure functions — `adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain` — so balance tweaks and unit tests can exercise them without a Phaser runtime. `MainScene` keeps thin wrappers (`weatherAdjAtkDmg` et al.) that read `this.weatherEffect()` once so `executeCombat` call sites stay compact. ATK damage is clamped to at least 1 HP so rounding never silently turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK −25 % / COOL +50 %` etc.).
 
@@ -234,7 +238,9 @@ Rock-paper-scissors style resolution with Heat management. Each step is split ov
 | **ATTACK**  | Clash (both −10)     | Blocked (0)       | Hit (kaiju −20)     |
 | **GUARD**   | Guarded (0)          | —                 | —                   |
 | **COOL**    | Vulnerable (mech −40)| Heat −40          | Heat −40            |
-| **SPECIAL** | Kaiju −40, Heat +80  | Break (kaiju −50) | Kaiju −40, Heat +80 |
+| **SPECIAL** | Kaiju −40, Heat +80* | Break (kaiju −50) | Kaiju −40, Heat +80* |
+
+\* **Heat +40** while **Emergency** (player HP ≤ 30) instead of +80. Weather multipliers on Heat gain still apply on top of this base.
 
 ### VFX
 
@@ -250,7 +256,7 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
 
 | Method | Sound design | Triggered on |
 | --- | --- | --- |
-| `playBeat()`    | Sine 95 → 42 Hz thump                      | Every rhythm beat |
+| `playBeat()`    | Sine 95 → 42 Hz thump; optional **`pitchMul`** (higher in Emergency) | Every rhythm & resolve **pulse** |
 | `playClick()`   | Square 1800 → 900 Hz + highpass            | Successful button input |
 | `playAttack()`  | Sine 160 → 48 Hz + low-passed noise click  | ATTACK resolution |
 | `playGuard()`   | Detuned triangle partials (2100 / 3150 Hz) | GUARD deflect |
@@ -272,7 +278,8 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
   - `BREAK` (SPECIAL vs GUARD): **200 ms**
   - `SPECIAL` (regular hit): **180 ms**
   - `VULNERABLE` (COOL vs ATTACK): **160 ms**
-- **Heat danger vignette**: When Heat ≥ `HEAT_DANGER` (80), a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
+- **Heat gauge** — the bar uses a three-stage colour ramp; the label shows **current Heat / 100** so exact numbers are always visible.
+- **Heat danger vignette**: When Heat ≥ `HEAT_DANGER` (80), a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk. **Emergency** (HP ≤ 30) uses a **separate** full-screen crisis layer; both can be visible at once.
 - **Relief flash + steam vent**: The instant a successful `COOL` pulls Heat back below 80, the vignette is cleared, `Camera.flash` bursts a blue-white `(136, 204, 255)` tint, and an **upward cone of light-blue additive particles** vents out of the player mech (30 particles, 240°–300° arc, `gravityY -120`, 720 ms lifespan). The "I made it!" release is now audible, visible, _and_ feels like real steam escaping.
 - **Praise pops**: The two most satisfying combat moments trigger a giant centre-screen gold callout that scales up with `Back.easeOut` overshoot and drifts upward as it fades:
   - `SPECIAL` vs `GUARD` (non-fatal) → **CRITICAL!!**
@@ -302,15 +309,15 @@ src/
   audio/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   config/
-    difficulty.ts        # Difficulty configs, `phaseIndexForWave`, ENDLESS `beatMsForEndlessWave`
+    difficulty.ts        # Difficulty configs, optional `maxWaves`, `phaseIndexForWave`, ENDLESS tempo
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
+    rhythmAndEmergency.ts # Input PERFECT/GOOD windows, emergency HP, SPECIAL heat in crisis, beat SFX pitch
   web3/
     WalletManager.ts     # EIP-1193 connect + personal_sign score attestation
     types.ts             # Shared EthereumProvider + Window.ethereum augmentation
     wallet.ts            # Legacy detection / transaction stubs
   utils/
-    records.ts           # localStorage-backed best-record persistence
     safeArea.ts          # FIT-mode scale config + safe-area inset probe
     wavedash.ts          # Wavedash load-complete notification
 public/

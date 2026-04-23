@@ -39,6 +39,12 @@ export interface DifficultyConfig {
    * EASY uses a longer interval to give learners extra time to read and react.
    */
   readonly beatMs: number;
+  /**
+   * If set, `maxWavesForDifficulty` returns this value instead of
+   * `phases * BOSS_EVERY` (not every target length is a multiple of
+   * `BOSS_EVERY`).
+   */
+  readonly maxWaves?: number;
 }
 
 export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> =
@@ -46,9 +52,10 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
     easy: {
       id: "easy",
       label: "EASY",
-      phases: 5,
+      phases: 1,
+      maxWaves: 9,
       hasWeather: false,
-      tagline: "5 phases · no weather · learn the rhythm",
+      tagline: "9 waves · no weather · learn the rhythm",
       // 48 BPM — 25% slower than normal; gives learners more
       // reading time without breaking the rhythmic feel.
       beatMs: 1250,
@@ -56,9 +63,10 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
     normal: {
       id: "normal",
       label: "NORMAL",
-      phases: 7,
+      phases: 2,
+      maxWaves: 15,
       hasWeather: true,
-      tagline: "7 phases · weather on · the intended ride",
+      tagline: "15 waves · weather on · the intended ride",
       beatMs: 1000, // 60 BPM — intended tempo
     },
     endless: {
@@ -66,7 +74,7 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
       label: "ENDLESS",
       phases: Infinity,
       hasWeather: true,
-      tagline: "no end · weather on · chase the best score",
+      tagline: "no end · weather on · survive the tempo climb",
       // Wave 1 / phase 0 base; in-run values come from `beatMsForEndlessWave`.
       beatMs: 1000, // 60 BPM
     },
@@ -87,8 +95,10 @@ export const DIFFICULTY_ORDER: readonly Difficulty[] = [
  * `Infinity` for endless runs.
  */
 export function maxWavesForDifficulty(diff: Difficulty): number {
-  const phases = DIFFICULTY_CONFIGS[diff].phases;
-  return phases === Infinity ? Infinity : phases * BOSS_EVERY;
+  const cfg = DIFFICULTY_CONFIGS[diff];
+  if (cfg.phases === Infinity) return Infinity;
+  if (cfg.maxWaves != null) return cfg.maxWaves;
+  return cfg.phases * BOSS_EVERY;
 }
 
 export function isEndless(diff: Difficulty): boolean {

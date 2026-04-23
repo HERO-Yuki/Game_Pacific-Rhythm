@@ -39,14 +39,14 @@ export const KAIJU_STATS: Readonly<Record<KaijuRank, KaijuRankStats>> = {
   boss: {
     texture: "kaiju-boss",
     hp: 180,
-    scaleMul: 1.18,
+    scaleMul: 1.4,
     label: "BOSS",
     labelColor: "#ff4444",
   },
   giga: {
     texture: "kaiju-giga",
     hp: 280,
-    scaleMul: 1.38,
+    scaleMul: 1.65,
     label: "GIGA",
     labelColor: "#ff2a8a",
   },
