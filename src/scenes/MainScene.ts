@@ -29,6 +29,13 @@ import {
   type Weather,
   type WeatherEffect,
 } from "../config/weather";
+import {
+  COMBO,
+  WAVE_CATHARSIS,
+  OVERHEAT_SFX,
+  comboDamageMultiplier,
+  flooredWithCombo,
+} from "../config/combatJuice";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 import { wallet, WalletManager } from "../web3/WalletManager";
 
@@ -408,6 +415,15 @@ export class MainScene extends Phaser.Scene {
   /** Cleared-giga counter (ENDLESS; shown on game-over). */
   private gigasDefeated = 0;
   /**
+   * Consecutive PERFECT slot inputs; GOOD / MISS / 被弾で 0。
+   * 解決フェーズの ATK/SPL 威力に `comboDamageMultiplier(comboCount)`。
+   */
+  private comboCount = 0;
+  /** 現在ウェーブのジャスト入力回数（撃破ボーナス表示用）。 */
+  private wavePerfectCount = 0;
+  /** `onWaveWin` の 800ms 実時間フリーズ用。 */
+  private waveCatharsisRealHandle: number | null = null;
+  /**
    * 0-based weather-phase index (every `BOSS_EVERY` waves is one
    * phase). -1 forces a re-roll on the very first wave so
    * `refreshWeatherHUD()` always runs at least once before combat.
@@ -429,6 +445,12 @@ export class MainScene extends Phaser.Scene {
   private score = 0;
   private ohStreak = 0;
   private phase = GamePhase.RHYTHM_KAIJU;
+  /**
+   * Repeating `time.addEvent` for resolution ticks. Must be removed when
+   * the round ends early (K.O. mid-resolve, final-wave clear) or stray
+   * `resolveTick` / `pulseBeat` calls continue behind overlays.
+   */
+  private resolutionBeatTimer: Phaser.Time.TimerEvent | null = null;
   private kaijuSeq: ActionType[] = [];
   private playerSeq: ActionType[] = [];
 
@@ -669,6 +691,8 @@ export class MainScene extends Phaser.Scene {
       // If a hit-stop is in flight, its out-of-band timeout would try
       // to poke a destroyed scene; drop the handle to be safe.
       this.cancelHitStop();
+      this.stopResolutionSchedule();
+      this.clearWaveCatharsisHandle();
       this.endEmergencyMode();
     });
 
@@ -701,6 +725,9 @@ export class MainScene extends Phaser.Scene {
     this.score = 0;
     this.bossesDefeated = 0;
     this.gigasDefeated = 0;
+    this.comboCount = 0;
+    this.wavePerfectCount = 0;
+    this.clearWaveCatharsisHandle();
     this.runStartTime = 0;
     this.ohStreak = 0;
     this.phase = GamePhase.RHYTHM_KAIJU;
@@ -713,6 +740,7 @@ export class MainScene extends Phaser.Scene {
     this.buttonsReady = false;
     this.ohAlarmedThisTurn = false;
     this.beatPulseIndex = 0;
+    this.stopResolutionSchedule();
     this.endEmergencyMode();
     this.hitStopActive = false;
     this.heatDangerActive = false;
@@ -2314,6 +2342,8 @@ export class MainScene extends Phaser.Scene {
    * waves (called immediately for zako, or after the alert dismisses).
    */
   private continueBeginWave(rank: KaijuRank): void {
+    this.wavePerfectCount = 0;
+    this.resetCombo();
     this.applyKaijuRank(rank);
     this.rollWeatherForWave();
     this.refreshHUD();
@@ -2731,6 +2761,7 @@ export class MainScene extends Phaser.Scene {
     if (idx < 0 || idx >= SEQ_LEN) return;
 
     if (this.playerSeq[idx] === ActionType.IDLE) {
+      this.resetCombo();
       const s = this.pSlots[idx];
       s.label.setText("MISS").setColor("#ff4444");
       s.bg.setFillStyle(PAL.miss, 0.25);
@@ -2770,7 +2801,14 @@ export class MainScene extends Phaser.Scene {
     this.playerSeq[pIdx] = action;
     this.rhythmInputQuality[pIdx] = timing;
     if (timing === "PERFECT") {
+      this.comboCount += 1;
+      this.wavePerfectCount += 1;
       this.playerHeat = Math.max(0, this.playerHeat - HEAT_BONUS.PERFECT_RELIEF);
+      if (this.comboCount >= 2) {
+        this.spawnChainComboPop();
+      }
+    } else {
+      this.resetCombo();
     }
 
     this.spawnRhythmTimingFeedback(pIdx, timing);
@@ -2858,7 +2896,45 @@ export class MainScene extends Phaser.Scene {
 
   /* ---- Phase C: Resolution ---- */
 
+  private stopResolutionSchedule(): void {
+    this.resolutionBeatTimer?.remove(false);
+    this.resolutionBeatTimer = null;
+  }
+
+  private clearWaveCatharsisHandle(): void {
+    if (this.waveCatharsisRealHandle !== null) {
+      window.clearTimeout(this.waveCatharsisRealHandle);
+      this.waveCatharsisRealHandle = null;
+    }
+  }
+
+  private pauseGlobalTimeScale(): void {
+    this.time.timeScale = 0;
+    this.tweens.timeScale = 0;
+  }
+
+  private resumeGlobalTimeScale(): void {
+    this.time.timeScale = 1;
+    this.tweens.timeScale = 1;
+  }
+
+  private resetCombo(): void {
+    this.comboCount = 0;
+  }
+
+  private playerComboDamageMultiplier(): number {
+    return comboDamageMultiplier(this.comboCount, COMBO.DMG_PER_STACK);
+  }
+
+  /**
+   * 敵からダメージを受けたらコンボ途切れ（衝突双方を含む）。
+   */
+  private onPlayerTookDamageFromKaiju(): void {
+    this.resetCombo();
+  }
+
   private startResolve(): void {
+    this.stopResolutionSchedule();
     this.phase = GamePhase.RESOLUTION;
     this.setPhaseDisplay("\u2694 RESOLUTION", "#ff6644");
     console.log(
@@ -2873,7 +2949,7 @@ export class MainScene extends Phaser.Scene {
     this.ohAlarmedThisTurn = false;
 
     let tick = 0;
-    this.time.addEvent({
+    this.resolutionBeatTimer = this.time.addEvent({
       delay: this.resolveMs,
       repeat: RESOLVE_TOTAL_TICKS - 1,
       callback: () => {
@@ -2977,6 +3053,7 @@ export class MainScene extends Phaser.Scene {
     const kAct = this.kaijuSeq[i];
 
     if (this.playerHeat >= OVERHEAT_THRESHOLD) {
+      this.resetCombo();
       this.ohStreak++;
       console.log(`[Step ${i}] OVERHEAT streak=${this.ohStreak}`);
       pAct = ActionType.IDLE;
@@ -2984,10 +3061,20 @@ export class MainScene extends Phaser.Scene {
       s.label.setText("OH!");
       s.bg.setFillStyle(PAL.heatRed, 0.7);
       this.reflowSlotLabelZab(s);
-      if (!this.ohAlarmedThisTurn) {
+      const isFirstOverheatInTurn = !this.ohAlarmedThisTurn;
+      if (isFirstOverheatInTurn) {
         this.ohAlarmedThisTurn = true;
-        audio.playOverheat({ pan: PAN_PLAYER });
+        audio.playOverheat({
+          pan: PAN_PLAYER,
+          volume: OVERHEAT_SFX.FIRST_STEP_VOLUME,
+        });
+      } else {
+        audio.playOverheat({
+          pan: PAN_PLAYER,
+          volume: OVERHEAT_SFX.SUBSEQUENT_STEP_VOLUME,
+        });
       }
+      this.spawnOverheatSilencePunish(i);
       if (this.ohStreak >= OVERHEAT_STREAK_LIMIT) {
         this.endGame("MELTDOWN");
         return;
@@ -3057,8 +3144,8 @@ export class MainScene extends Phaser.Scene {
     const kR = this.kaijuBody;
     const pR = this.playerBody;
     // Capture the pre-combat kaiju HP so we can distinguish a kill
-    // (transition across zero) from a non-fatal hit at the end of
-    // the method. Used to drive the gold EXCELLENT!! praise pop.
+    // (transition across zero) from a non-fatal hit; CRITICAL! は
+    // 非撃破専用。
     const prevKaijuHP = this.kaijuHP;
 
     switch (pAct) {
@@ -3066,9 +3153,11 @@ export class MainScene extends Phaser.Scene {
         this.playerHeat += this.weatherAdjHeatGain(HEAT_DELTA.attack);
         audio.playAttack({ pan: PAN_PLAYER });
         if (kAct === ActionType.ATTACK) {
+          const m = this.playerComboDamageMultiplier();
           const clashDmg = this.weatherAdjAtkDmg(DMG.clash);
-          const dealtK = this.damageKaiju(clashDmg, false);
+          const dealtK = this.damageKaiju(flooredWithCombo(clashDmg, m), false);
           this.playerHP -= clashDmg;
+          this.onPlayerTookDamageFromKaiju();
           msg =
             dealtK < clashDmg
               ? `CLASH!  YOU -${clashDmg}  KAIJU -${dealtK}  (SPECIAL to finish BOSS)`
@@ -3088,7 +3177,11 @@ export class MainScene extends Phaser.Scene {
           this.flash(kR, VFX.flash.kaijuBlock);
           this.shake(30, 80);
         } else {
-          const hitDmg = this.weatherAdjAtkDmg(DMG.attack);
+          const m = this.playerComboDamageMultiplier();
+          const hitDmg = flooredWithCombo(
+            this.weatherAdjAtkDmg(DMG.attack),
+            m,
+          );
           const dealtK = this.damageKaiju(hitDmg, false);
           msg =
             dealtK < hitDmg
@@ -3120,6 +3213,7 @@ export class MainScene extends Phaser.Scene {
         if (kAct === ActionType.ATTACK) {
           const vulnDmg = this.weatherAdjAtkDmg(DMG.coolVulnerable);
           this.playerHP -= vulnDmg;
+          this.onPlayerTookDamageFromKaiju();
           msg = `VULNERABLE! PLAYER -${vulnDmg}`;
           this.popText(pR, `-${vulnDmg}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.crit);
@@ -3143,13 +3237,14 @@ export class MainScene extends Phaser.Scene {
         // payoff of punching through a defence is bigger.
         const hitStopMs =
           kAct === ActionType.GUARD ? HITSTOP_MS.break : HITSTOP_MS.special;
+        const mS = this.playerComboDamageMultiplier();
         if (kAct === ActionType.GUARD) {
-          const vsG = DMG.specialVsGuard;
+          const vsG = flooredWithCombo(DMG.specialVsGuard, mS);
           const dealtK = this.damageKaiju(vsG, true);
           msg = `BREAK! KAIJU -${dealtK}`;
           this.popText(kR, `-${dealtK}`, VFX.pop.special);
         } else {
-          const sp = DMG.special;
+          const sp = flooredWithCombo(DMG.special, mS);
           const dealtK = this.damageKaiju(sp, true);
           msg = `SPECIAL! KAIJU -${dealtK}`;
           this.popText(kR, `-${dealtK}`, VFX.pop.special);
@@ -3166,6 +3261,7 @@ export class MainScene extends Phaser.Scene {
         if (kAct === ActionType.ATTACK) {
           const hitDmg = this.weatherAdjAtkDmg(DMG.attack);
           this.playerHP -= hitDmg;
+          this.onPlayerTookDamageFromKaiju();
           msg = `HIT! PLAYER -${hitDmg}`;
           this.popText(pR, `-${hitDmg}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.hit);
@@ -3181,13 +3277,13 @@ export class MainScene extends Phaser.Scene {
     console.log(`[Step ${step}] P:${pAct} vs K:${kAct} \u2192 ${msg}`);
     this.showMessage(msg);
 
-    // Praise pops: kills always win over guard-breaks — the kill is
-    // the bigger narrative beat. Only non-fatal SPECIAL-through-GUARD
-    // hits trigger the CRITICAL callout.
+    // 撃破は `runKaijuDefeatCatharsis` に任せ、ここは非致死 GUARD 割り専用。
     const killed = prevKaijuHP > 0 && this.kaijuHP <= 0;
-    if (killed) {
-      this.showPraise("EXCELLENT!!");
-    } else if (pAct === ActionType.SPECIAL && kAct === ActionType.GUARD) {
+    if (
+      !killed &&
+      pAct === ActionType.SPECIAL &&
+      kAct === ActionType.GUARD
+    ) {
       this.showPraise("CRITICAL!!");
     }
   }
@@ -3197,45 +3293,258 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   private onWaveWin(): void {
-    // Stay in RESOLUTION during the blink animation to prevent
-    // updateRhythm from running with stale timing state.
-    this.score++;
-    // Bookkeep rank kills for ENDLESS game-over stats display
-    // numbers, and so we can show "N bosses / N gigas" on clear.
+    // Do not let scheduled resolution ticks run after the K.O. — they
+    // would keep pulsing the beat, telegraphing, and resolving under
+    // the clear / next-wave flow.
+    this.stopResolutionSchedule();
+    this.cancelHitStop();
+
+    const perfectBonus =
+      this.wavePerfectCount * WAVE_CATHARSIS.BONUS_PER_PERFECT;
+    const isFinal = this.wave >= this.maxWave;
+
+    this.clearWaveCatharsisHandle();
+    this.pauseGlobalTimeScale();
+    this.waveCatharsisRealHandle = window.setTimeout(() => {
+      this.waveCatharsisRealHandle = null;
+      if (!this.scene.isActive() || this.phase === GamePhase.GAME_OVER) {
+        this.resumeGlobalTimeScale();
+        return;
+      }
+      this.resumeGlobalTimeScale();
+      this.runKaijuDefeatCatharsis(perfectBonus, () => {
+        this.proceedAfterKaijuDefeat(perfectBonus, isFinal);
+      });
+    }, WAVE_CATHARSIS.FREEZE_MS);
+  }
+
+  private emitKaijuDefeatExplosion(x: number, y: number): void {
+    const burst = this.add.particles(x, y, "spark", {
+      speed: { min: 100, max: 300 },
+      scale: { start: 1, end: 0 },
+      alpha: { start: 0.95, end: 0.15 },
+      angle: { min: 0, max: 360 },
+      tint: [0xff6622, 0xff2200, 0xffaa33, 0xff4400],
+      lifespan: 800,
+      quantity: 72,
+      emitting: false,
+    });
+    burst.setDepth(DEPTH.sparks);
+    burst.setBlendMode(Phaser.BlendModes.ADD);
+    burst.explode(72);
+    this.time.delayedCall(1000, () => burst.destroy());
+  }
+
+  /**
+   * フリーズ解除直後: 白フラッシュ + 爆風 + 大絶賛 UI。終了後 `onComplete`。
+   */
+  private runKaijuDefeatCatharsis(
+    perfectBonus: number,
+    onComplete: () => void,
+  ): void {
+    const W = this.scale.width;
+    const H = this.scale.height;
+    const kx = this.kaijuBody.x;
+    const ky = this.kaijuBody.y;
+
+    this.cameras.main.flash(500, 255, 255, 255, true);
+    this.emitKaijuDefeatExplosion(kx, ky);
+
+    const c = this.add.container(W / 2, H * 0.4);
+    c.setDepth(DEPTH.popText + 2);
+
+    const t1Z = this.add.graphics();
+    const t1 = this.add
+      .text(0, -28, "[ KAIJU DESTROYED ]", {
+        fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
+        fontSize: `${Math.max(28, Math.round(H * 0.08))}px`,
+        color: "#ffd24a",
+        stroke: "#1a0a00",
+        strokeThickness: 10,
+        shadow: { offsetX: 0, offsetY: 5, color: "#000000", blur: 8, fill: true },
+      })
+      .setOrigin(0.5);
+    this.layoutZabutonBehindText(t1, t1Z, 12, 0.68);
+
+    const t2Z = this.add.graphics();
+    const t2 = this.add
+      .text(0, 28, `PERFECT BONUS: +${perfectBonus}`, {
+        fontFamily: FONT,
+        fontSize: `${Math.max(16, Math.round(H * 0.032))}px`,
+        color: "#fff2aa",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 6,
+        shadow: { ...HUD_SHADOW, blur: 6 },
+      })
+      .setOrigin(0.5);
+    this.layoutZabutonBehindText(t2, t2Z, 10, 0.6);
+
+    c.add([t1Z, t1, t2Z, t2]);
+    c.setAlpha(0);
+    this.tweens.add({
+      targets: c,
+      alpha: 1,
+      duration: 220,
+    });
+    this.tweens.add({
+      targets: c,
+      scale: { from: 0.88, to: 1.02 },
+      duration: 420,
+      ease: "Back.easeOut",
+    });
+
+    this.time.delayedCall(WAVE_CATHARSIS.PRIZE_HOLD_MS, () => {
+      this.tweens.add({
+        targets: c,
+        alpha: 0,
+        y: c.y - 32,
+        duration: 300,
+        onComplete: () => c.destroy(),
+      });
+    });
+    this.time.delayedCall(WAVE_CATHARSIS.PRIZE_HOLD_MS + 120, onComplete);
+  }
+
+  private proceedAfterKaijuDefeat(perfectBonus: number, isFinal: boolean): void {
     const rank = pickKaijuRank(this.wave);
+    this.score += 1;
+    this.score += perfectBonus;
     if (rank === "boss") this.bossesDefeated += 1;
     else if (rank === "giga") this.gigasDefeated += 1;
+    this.refreshProgressHUD();
+    this.refreshHUD();
     console.log(
       `[Wave ${this.wave}] ${rank.toUpperCase()} defeated — Score: ${this.score}`,
     );
 
-    // Finite-length runs: the final wave clear triggers GAME CLEAR
-    // instead of spinning up another encounter. ENDLESS returns
-    // `Infinity`, so this branch is only reachable for EASY / NORMAL.
-    if (this.wave >= this.maxWave) {
-      this.tweens.add({
-        targets: this.kaijuBody,
-        alpha: 0,
-        duration: 80,
-        yoyo: true,
-        repeat: 6,
-        onComplete: () =>
-          this.time.delayedCall(400, () => this.triggerGameClear()),
-      });
-      return;
-    }
+    const next = isFinal
+      ? () => this.triggerGameClear()
+      : () => this.beginWave();
+    this.scheduleKaijuBodyDefeatExitThen(next);
+  }
 
+  /**
+   * 撃破後の共通「点滅 → 短い間 → 次シーン遷移」カイジュ退場。
+   */
+  private scheduleKaijuBodyDefeatExitThen(next: () => void): void {
     this.tweens.add({
       targets: this.kaijuBody,
       alpha: 0,
       duration: 80,
       yoyo: true,
       repeat: 6,
-      onComplete: () => this.time.delayedCall(400, () => this.beginWave()),
+      onComplete: () => this.time.delayedCall(400, next),
+    });
+  }
+
+  /** PERFECT 連打の火力連鎖表示（2 本目から）。 */
+  private spawnChainComboPop(): void {
+    const H = this.scale.height;
+    const cx = this.heatGaugeContainer.x;
+    const cy = this.heatGaugeContainer.y - H * 0.11;
+
+    const zab = this.add.graphics();
+    const t = this.add
+      .text(0, 0, `${this.comboCount} CHAIN!`, {
+        fontFamily: FONT,
+        fontSize: `${Math.max(19, Math.round(H * 0.038))}px`,
+        color: "#ff8800",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 6,
+        shadow: { ...HUD_SHADOW },
+      })
+      .setOrigin(0.5)
+      .setAngle(-10);
+    this.layoutZabutonBehindText(t, zab, 9, 0.58);
+    const ctr = this.add.container(cx, cy, [zab, t]);
+    ctr.setDepth(DEPTH.popText + 3);
+    ctr.setScale(0.0001);
+
+    this.tweens.add({
+      targets: ctr,
+      scaleX: 1.2,
+      scaleY: 1.2,
+      duration: 380,
+      ease: "Back.easeOut",
+    });
+    this.tweens.add({
+      targets: ctr,
+      y: cy - 48,
+      alpha: 0,
+      duration: 700,
+      delay: 500,
+      ease: "Sine.easeIn",
+      onComplete: () => ctr.destroy(),
+    });
+  }
+
+  /**
+   * オーバーヒートでアクション消滅したステップ: 黒煙 + ERROR ラベル + 枠点滅。
+   */
+  private spawnOverheatSilencePunish(i: number): void {
+    const s = this.pSlots[i];
+    if (!s?.bg) return;
+
+    const sm = this.add.particles(
+      this.playerBody.x,
+      this.playerBody.y + 8,
+      "spark",
+      {
+        speed: { min: 8, max: 46 },
+        angle: { min: 250, max: 290 },
+        gravityY: -32,
+        alpha: { start: 0.7, end: 0 },
+        scale: { start: 2, end: 4 },
+        tint: [0x111111, 0x333333, 0x1c1c1c],
+        lifespan: 1100,
+        quantity: 22,
+        emitting: false,
+      },
+    );
+    sm.setDepth(DEPTH.sparks);
+    sm.explode(22);
+    this.time.delayedCall(1200, () => sm.destroy());
+
+    const err = this.add
+      .text(s.bg.x, s.bg.y - this.slotSz * 0.55, "ERROR", {
+        fontFamily: FONT,
+        fontSize: "15px",
+        color: "#ff3333",
+        fontStyle: "bold",
+        stroke: "#1a0000",
+        strokeThickness: 5,
+        shadow: { ...HUD_SHADOW },
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.popText + 2);
+    this.tweens.add({
+      targets: err,
+      alpha: 0,
+      y: err.y - 20,
+      duration: 500,
+      delay: 200,
+      onComplete: () => err.destroy(),
+    });
+
+    for (let f = 0; f < 6; f++) {
+      this.time.delayedCall(f * 200, () => {
+        s.border.setStrokeStyle(4, 0xff0a0a, 0.95);
+      });
+      this.time.delayedCall(f * 200 + 100, () => {
+        s.border.setStrokeStyle(2, 0xff2222, 0.85);
+      });
+    }
+    this.time.delayedCall(1300, () => {
+      s.border.setStrokeStyle(2, PAL.heatRed, 0.8);
     });
   }
 
   private endGame(reason: string): void {
+    this.clearWaveCatharsisHandle();
+    this.resumeGlobalTimeScale();
+    this.stopResolutionSchedule();
     this.phase = GamePhase.GAME_OVER;
     this.rhythmCursor.setVisible(false);
     this.timingBar.setVisible(false);
@@ -3286,6 +3595,9 @@ export class MainScene extends Phaser.Scene {
    * difficulty without a click.
    */
   private triggerGameClear(): void {
+    this.clearWaveCatharsisHandle();
+    this.resumeGlobalTimeScale();
+    this.stopResolutionSchedule();
     this.phase = GamePhase.GAME_CLEAR;
     this.rhythmCursor.setVisible(false);
     this.timingBar.setVisible(false);
