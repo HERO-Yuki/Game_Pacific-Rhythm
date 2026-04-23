@@ -17,6 +17,7 @@ Built with **Phaser 3 shapes and text** plus a pair of bespoke Midjourney flat-v
 3. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
 4. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
 5. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. How many waves can your pilot survive?
+6. **Weather**: Every **3-wave phase** (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK-25% / COOL+50%), `SAND` (one kaiju slot masked as `?`), or `DROUGHT` (Heat gain +50%). The active weather is shown in the top-left HUD and stays locked for the whole phase; Phase 1 is always CLEAR so newcomers meet the core loop first.
 
 ### Input timing
 
@@ -81,6 +82,7 @@ src/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   config/
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
+    weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
   web3/                  # Ethereum integration stubs
   utils/
     safeArea.ts          # FIT-mode scale config + safe-area inset probe
@@ -121,6 +123,24 @@ Waves cycle between three ranks. All the tunables live in [`src/config/enemies.t
 | `giga` | Every `GIGA_EVERY = 9` waves (9, 18, 27…) — overrides boss | `kaiju-giga` | 280 | 1.38× |
 
 `pickKaijuRank(wave)` (pure, tested by inspection) maps a 1-based wave index to a rank using giga > boss > zako priority. `MainScene.applyKaijuRank()` then swaps the body's texture, display size, HP budget, and name label in one place.
+
+### Weather system
+
+Weather is a *phase-scoped* modifier bundled in [`src/config/weather.ts`](src/config/weather.ts). A "phase" equals `BOSS_EVERY = 3` waves, so every phase opens with two zako fights and closes with a boss (or giga on every third phase). The weather is rolled once per phase and stays locked for all three waves; Phase 1 is hard-wired to `clear` so first-time players learn the core loop unburdened.
+
+| Weather | ATK dmg | COOL bonus | Heat gain | Sand mask |
+| --- | --- | --- | --- | --- |
+| `clear`   | ×1.00 | ×1.00 | ×1.00 | — |
+| `snow`    | ×0.75 | ×1.50 | ×1.00 | — |
+| `sand`    | ×1.00 | ×1.00 | ×1.00 | 1 kaiju slot shows `?` |
+| `drought` | ×1.00 | ×1.00 | ×1.50 | — |
+
+- **ATK dmg** multiplies every ATTACK-flavoured damage event (HIT, CLASH, kaiju ATTACK landing on a cooling mech). SPECIAL damage deliberately bypasses this so the big finisher still hits hard.
+- **COOL bonus** multiplies COOL's negative Heat delta; `snow` turns `-40` into `-60`.
+- **Heat gain** multiplies every positive Heat delta (ATTACK wind-up and SPECIAL charge).
+- **Sand mask** hides one random kaiju reveal slot as `?` during Reading; `telegraphKaiju()` unmasks it right before it resolves so the player still learns from the outcome.
+
+Three helper methods on `MainScene` — `weatherAdjAtkDmg`, `weatherAdjCoolDelta`, `weatherAdjHeatGain` — wrap the multiplications and clamp ATK damage to at least 1 so rounding never turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK -25% / COOL +50%` etc.).
 
 ### Combat system
 

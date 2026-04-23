@@ -1,10 +1,17 @@
 import Phaser from "phaser";
 import { audio } from "../audio/AudioManager";
 import {
+  BOSS_EVERY,
   KAIJU_STATS,
   pickKaijuRank,
   type KaijuRank,
 } from "../config/enemies";
+import {
+  pickWeather,
+  WEATHER_EFFECTS,
+  type Weather,
+  type WeatherEffect,
+} from "../config/weather";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 
 /* ===================================================================
@@ -138,6 +145,9 @@ const ACT_COL: Record<ActionType, number> = {
   [ActionType.IDLE]: 0x666666,
 };
 
+/** Neutral grey used to paint a sand-weather masked kaiju slot. */
+const PAL_SAND_MASK = 0x7a7a86;
+
 const ACT_SHORT: Record<ActionType, string> = {
   [ActionType.ATTACK]: "ATK",
   [ActionType.GUARD]: "GRD",
@@ -236,6 +246,21 @@ export class MainScene extends Phaser.Scene {
   private currentKaijuMaxHP = KAIJU_STATS.zako.hp;
   /** 1-based wave index. Increments at the start of every beginWave(). */
   private wave = 0;
+  /**
+   * 0-based weather-phase index (every `BOSS_EVERY` waves is one
+   * phase). -1 forces a re-roll on the very first wave so
+   * `refreshWeatherHUD()` always runs at least once before combat.
+   */
+  private currentPhaseIndex = -1;
+  /** Active weather for the current phase — drives combat multipliers. */
+  private currentWeather: Weather = "clear";
+  /**
+   * Index (0..SEQ_LEN-1) of the kaiju reveal slot masked as "?" this
+   * wave under sand weather, or -1 for no mask. Rolled once per wave
+   * so the obscured slot is stable across the Reading phase but
+   * unpredictable between encounters.
+   */
+  private kaijuNoiseSlotIdx = -1;
   private score = 0;
   private ohStreak = 0;
   private phase = GamePhase.RHYTHM_KAIJU;
@@ -291,6 +316,9 @@ export class MainScene extends Phaser.Scene {
   private btns: BtnUI[] = [];
   private phaseLabel!: Phaser.GameObjects.Text;
   private scoreLabel!: Phaser.GameObjects.Text;
+  /** Top-left weather indicator — big name + small modifier note. */
+  private weatherLabel!: Phaser.GameObjects.Text;
+  private weatherDetailLabel!: Phaser.GameObjects.Text;
   private msgLabel!: Phaser.GameObjects.Text;
   private goLayer!: Phaser.GameObjects.Container;
   private goScoreText!: Phaser.GameObjects.Text;
@@ -377,6 +405,9 @@ export class MainScene extends Phaser.Scene {
     this.kaijuHP = KAIJU_STATS.zako.hp;
     this.currentKaijuMaxHP = KAIJU_STATS.zako.hp;
     this.wave = 0;
+    this.currentPhaseIndex = -1;
+    this.currentWeather = "clear";
+    this.kaijuNoiseSlotIdx = -1;
     this.score = 0;
     this.ohStreak = 0;
     this.phase = GamePhase.RHYTHM_KAIJU;
@@ -409,6 +440,14 @@ export class MainScene extends Phaser.Scene {
     this.phaseLabel = this.txt(W / 2, 16, "", 18, "#8b949e").setOrigin(0.5, 0);
     this.scoreLabel = this.txt(W - 20, 16, "SCORE: 0", 15, "#6e7681").setOrigin(
       1,
+      0,
+    );
+    // Weather indicator lives on the otherwise empty top-left shelf.
+    // Two stacked lines so the modifier summary is legible at a glance
+    // without crowding the headline.
+    this.weatherLabel = this.txt(20, 14, "", 13, "#8b949e").setOrigin(0, 0);
+    this.weatherDetailLabel = this.txt(20, 30, "", 10, "#6e7681").setOrigin(
+      0,
       0,
     );
     this.msgLabel = this.txt(W / 2, H * 0.47, "", 16, "#ffcc00")
@@ -846,11 +885,70 @@ export class MainScene extends Phaser.Scene {
     this.wave += 1;
     const rank = pickKaijuRank(this.wave);
     this.applyKaijuRank(rank);
+    this.rollWeatherForWave();
     this.refreshHUD();
     console.log(
-      `[Wave ${this.wave}] ${rank.toUpperCase()} — HP ${this.kaijuHP}`,
+      `[Wave ${this.wave}] ${rank.toUpperCase()} — HP ${this.kaijuHP} — ` +
+        `WEATHER ${this.currentWeather.toUpperCase()}` +
+        (this.kaijuNoiseSlotIdx >= 0
+          ? ` (mask slot ${this.kaijuNoiseSlotIdx})`
+          : ""),
     );
     this.startRhythmSequence();
+  }
+
+  /**
+   * Re-roll weather when we cross a phase boundary, then pick a fresh
+   * sand-mask slot for this wave (sand is the only weather that uses
+   * per-wave randomisation — its effect would lose bite if the masked
+   * slot stayed constant across three waves in a row).
+   */
+  private rollWeatherForWave(): void {
+    const phaseIdx = Math.floor((this.wave - 1) / BOSS_EVERY);
+    if (phaseIdx !== this.currentPhaseIndex) {
+      this.currentPhaseIndex = phaseIdx;
+      this.currentWeather = pickWeather(phaseIdx);
+      this.refreshWeatherHUD();
+    }
+    const eff = this.weatherEffect();
+    this.kaijuNoiseSlotIdx =
+      eff.kaijuNoiseSlots > 0
+        ? Phaser.Math.Between(0, SEQ_LEN - 1)
+        : -1;
+  }
+
+  /** Convenience accessor so consumers never touch the table directly. */
+  private weatherEffect(): WeatherEffect {
+    return WEATHER_EFFECTS[this.currentWeather];
+  }
+
+  /** Paint the top-left weather shelf with the current mood + summary. */
+  private refreshWeatherHUD(): void {
+    const eff = this.weatherEffect();
+    this.weatherLabel.setText(`WEATHER: ${eff.label}`).setColor(eff.color);
+    this.weatherDetailLabel.setText(eff.hudDetail);
+  }
+
+  /* ---- Combat modifier helpers ---- */
+
+  /**
+   * Apply the weather's ATTACK damage multiplier and clamp to at least
+   * 1 HP so rounding never turns a landed hit into a no-op. SPECIAL
+   * damage stays pristine — it deliberately shrugs off weather.
+   */
+  private weatherAdjAtkDmg(base: number): number {
+    const scaled = Math.round(base * this.weatherEffect().attackDmgMul);
+    return Math.max(1, scaled);
+  }
+
+  /** Scale COOL's negative heat delta. Input is negative; output too. */
+  private weatherAdjCoolDelta(base: number): number {
+    return Math.round(base * this.weatherEffect().coolBonusMul);
+  }
+
+  /** Scale any positive Heat gain (ATTACK wind-up, SPECIAL charge). */
+  private weatherAdjHeatGain(base: number): number {
+    return Math.round(base * this.weatherEffect().heatGainMul);
   }
 
   /**
@@ -967,9 +1065,15 @@ export class MainScene extends Phaser.Scene {
   private revealKaijuSlot(i: number): void {
     const action = this.kaijuSeq[i];
     const s = this.kSlots[i];
-    s.bg.setFillStyle(ACT_COL[action], 0.5);
-    s.border.setStrokeStyle(2, ACT_COL[action]);
-    s.label.setText(ACT_SHORT[action]);
+    const masked = i === this.kaijuNoiseSlotIdx;
+    // Masked slots get a neutral grey coat + "?" so the player cannot
+    // deduce the action from the colour either. The real action will
+    // still resolve normally — and telegraphKaiju will unmask the slot
+    // a beat before it lands so players can learn from the outcome.
+    const col = masked ? PAL_SAND_MASK : ACT_COL[action];
+    s.bg.setFillStyle(col, 0.5);
+    s.border.setStrokeStyle(2, col);
+    s.label.setText(masked ? "?" : ACT_SHORT[action]);
     this.tweens.add({
       targets: [s.bg, s.label],
       alpha: { from: 0, to: 1 },
@@ -1163,6 +1267,16 @@ export class MainScene extends Phaser.Scene {
     const kAct = this.kaijuSeq[i];
     const kR = this.kaijuBody;
 
+    // If this slot was masked by sand weather, reveal it now — the
+    // action is about to land, so hiding it any longer would just
+    // confuse the player instead of creating suspense.
+    if (i === this.kaijuNoiseSlotIdx) {
+      const s = this.kSlots[i];
+      s.bg.setFillStyle(ACT_COL[kAct], 0.5);
+      s.border.setStrokeStyle(2, ACT_COL[kAct]);
+      s.label.setText(ACT_SHORT[kAct]);
+    }
+
     switch (kAct) {
       case ActionType.ATTACK:
         audio.playAttack({ pan: PAN_KAIJU });
@@ -1276,14 +1390,15 @@ export class MainScene extends Phaser.Scene {
 
     switch (pAct) {
       case ActionType.ATTACK:
-        this.playerHeat += HEAT_DELTA.attack;
+        this.playerHeat += this.weatherAdjHeatGain(HEAT_DELTA.attack);
         audio.playAttack({ pan: PAN_PLAYER });
         if (kAct === ActionType.ATTACK) {
-          this.kaijuHP -= DMG.clash;
-          this.playerHP -= DMG.clash;
-          msg = "CLASH! Both -10";
-          this.popText(kR, `-${DMG.clash}`, VFX.pop.damage);
-          this.popText(pR, `-${DMG.clash}`, VFX.pop.damage);
+          const clashDmg = this.weatherAdjAtkDmg(DMG.clash);
+          this.kaijuHP -= clashDmg;
+          this.playerHP -= clashDmg;
+          msg = `CLASH! Both -${clashDmg}`;
+          this.popText(kR, `-${clashDmg}`, VFX.pop.damage);
+          this.popText(pR, `-${clashDmg}`, VFX.pop.damage);
           this.emitSparks((kR.x + pR.x) / 2, kR.y, VFX.spark.hit);
           this.flash(kR, VFX.flash.kaijuHit);
           this.flash(pR, VFX.flash.playerHit);
@@ -1297,9 +1412,10 @@ export class MainScene extends Phaser.Scene {
           this.flash(kR, VFX.flash.kaijuBlock);
           this.shake(30, 80);
         } else {
-          this.kaijuHP -= DMG.attack;
-          msg = `HIT! KAIJU -${DMG.attack}`;
-          this.popText(kR, `-${DMG.attack}`, VFX.pop.damage);
+          const hitDmg = this.weatherAdjAtkDmg(DMG.attack);
+          this.kaijuHP -= hitDmg;
+          msg = `HIT! KAIJU -${hitDmg}`;
+          this.popText(kR, `-${hitDmg}`, VFX.pop.damage);
           this.emitSparks(kR.x, kR.y, VFX.spark.hit);
           this.flash(kR, VFX.flash.kaijuHit);
           this.shake(60, 140);
@@ -1320,12 +1436,13 @@ export class MainScene extends Phaser.Scene {
         break;
 
       case ActionType.COOL:
-        this.playerHeat += HEAT_DELTA.cool;
+        this.playerHeat += this.weatherAdjCoolDelta(HEAT_DELTA.cool);
         audio.playCool({ pan: PAN_PLAYER });
         if (kAct === ActionType.ATTACK) {
-          this.playerHP -= DMG.coolVulnerable;
-          msg = `VULNERABLE! PLAYER -${DMG.coolVulnerable}`;
-          this.popText(pR, `-${DMG.coolVulnerable}`, VFX.pop.damage);
+          const vulnDmg = this.weatherAdjAtkDmg(DMG.coolVulnerable);
+          this.playerHP -= vulnDmg;
+          msg = `VULNERABLE! PLAYER -${vulnDmg}`;
+          this.popText(pR, `-${vulnDmg}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.crit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(180, 250);
@@ -1339,7 +1456,7 @@ export class MainScene extends Phaser.Scene {
         break;
 
       case ActionType.SPECIAL: {
-        this.playerHeat += HEAT_DELTA.special;
+        this.playerHeat += this.weatherAdjHeatGain(HEAT_DELTA.special);
         audio.playSpecial({ pan: PAN_PLAYER });
         // Hit-stop is slightly longer on a GUARD break because the
         // payoff of punching through a defence is bigger.
@@ -1364,9 +1481,10 @@ export class MainScene extends Phaser.Scene {
 
       default:
         if (kAct === ActionType.ATTACK) {
-          this.playerHP -= DMG.attack;
-          msg = `HIT! PLAYER -${DMG.attack}`;
-          this.popText(pR, `-${DMG.attack}`, VFX.pop.damage);
+          const hitDmg = this.weatherAdjAtkDmg(DMG.attack);
+          this.playerHP -= hitDmg;
+          msg = `HIT! PLAYER -${hitDmg}`;
+          this.popText(pR, `-${hitDmg}`, VFX.pop.damage);
           this.emitSparks(pR.x, pR.y, VFX.spark.hit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(60, 140);
