@@ -686,7 +686,14 @@ export class MainScene extends Phaser.Scene {
 
   /* ---- Rhythm phase (Foreshadow + Programming, 8 beats) ---- */
 
-  private startRhythmSequence(): void {
+  /**
+   * Kick off a fresh rhythm phase. `leadInMs` controls the gap before
+   * the first beat fires — RHYTHM_MS (default) gives the player a
+   * full 60-BPM beat of breathing room when a new kaiju appears, while
+   * a tighter value is used when looping back after a resolve phase
+   * against the same kaiju so the encounter flows without dead time.
+   */
+  private startRhythmSequence(leadInMs: number = RHYTHM_MS): void {
     this.phase = GamePhase.RHYTHM_KAIJU;
     this.setPhaseDisplay("\u266a READING", "#ffcc00");
     this.clearSlots();
@@ -699,7 +706,7 @@ export class MainScene extends Phaser.Scene {
     this.playerSeq = Array.from({ length: SEQ_LEN }, () => ActionType.IDLE);
     this.rhythmEnded = false;
 
-    this.rhythmStartTime = this.time.now + RHYTHM_MS;
+    this.rhythmStartTime = this.time.now + leadInMs;
     this.lastProcessedBeat = -1;
 
     this.rhythmCursor.setPosition(this.kSlots[0].bg.x, this.kSlots[0].bg.y);
@@ -758,9 +765,10 @@ export class MainScene extends Phaser.Scene {
       this.playerSeq.map((a) => ACT_SHORT[a]).join(" "),
     );
 
-    this.time.delayedCall(Math.round(RHYTHM_MS * 0.5), () => {
-      if (this.phase !== GamePhase.GAME_OVER) this.startResolve();
-    });
+    // No artificial gap: resolve's own addEvent(delay=RESOLVE_MS) is the
+    // only rest between rhythm's last beat and resolve's first tick, so
+    // the pulse keeps flowing into the combat phase.
+    if (this.phase !== GamePhase.GAME_OVER) this.startResolve();
   }
 
   /* ---- Rhythm helpers ---- */
@@ -1048,9 +1056,10 @@ export class MainScene extends Phaser.Scene {
     }
 
     if (i >= SEQ_LEN - 1) {
-      this.time.delayedCall(Math.round(RESOLVE_MS * 1.5), () => {
-        if (this.phase === GamePhase.RESOLUTION) this.startRhythmSequence();
-      });
+      // Loop straight back into the next rhythm against the same kaiju
+      // with only one 120-BPM beat of space so the pulse is unbroken.
+      // The post-defeat pause lives in onWaveWin, not here.
+      this.startRhythmSequence(RESOLVE_MS);
     }
   }
 

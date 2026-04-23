@@ -5,3 +5,7 @@ dist
 .env
 .env.*
 !.env.example
+
+# Local design notes, prompt drafts, and other scratch material
+# that should not be part of the public repo.
+docs/
