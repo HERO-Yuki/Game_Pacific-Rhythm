@@ -113,7 +113,6 @@ const HEAT_DELTA = {
 const PAL = {
   bg: 0x0b0f14,
   kaiju: 0xcc3333,
-  player: 0x3366cc,
   slotBg: 0x1a1f2e,
   slotStroke: 0x3d4663,
   highlight: 0xffcc00,
@@ -236,7 +235,12 @@ export class MainScene extends Phaser.Scene {
 
   /* ---------- UI refs ---------- */
   private kaijuRect!: Phaser.GameObjects.Rectangle;
-  private playerRect!: Phaser.GameObjects.Rectangle;
+  /**
+   * Player mech body — textured Image rather than a flat Rectangle so
+   * we can use the Midjourney illustration. All VFX helpers accept
+   * both Rectangle and Image so the kaiju side keeps working for now.
+   */
+  private playerBody!: Phaser.GameObjects.Image;
   private kaijuHPText!: Phaser.GameObjects.Text;
   private playerHPText!: Phaser.GameObjects.Text;
   private playerHeatText!: Phaser.GameObjects.Text;
@@ -405,7 +409,9 @@ export class MainScene extends Phaser.Scene {
     this.txt(kx, cy + sz / 2 + 8, "KAIJU", 11, "#cc3333").setOrigin(0.5, 0);
 
     const px = W * 0.75;
-    this.playerRect = this.add.rectangle(px, cy, sz, sz, PAL.player);
+    this.playerBody = this.add
+      .image(px, cy, "mech-player")
+      .setDisplaySize(sz, sz);
     const hpBarY = cy - sz / 2 - barGap * 2;
     this.add
       .rectangle(px, hpBarY, this.barMaxW, barH, 0x222222)
@@ -616,7 +622,7 @@ export class MainScene extends Phaser.Scene {
   private cacheBounceTargets(): void {
     this.bounceTargets = [
       this.kaijuRect,
-      this.playerRect,
+      this.playerBody,
       this.phaseLabel,
       this.scoreLabel,
       ...this.btns.map((b) => b.container),
@@ -1081,7 +1087,7 @@ export class MainScene extends Phaser.Scene {
   ): void {
     let msg: string;
     const kR = this.kaijuRect;
-    const pR = this.playerRect;
+    const pR = this.playerBody;
 
     switch (pAct) {
       case ActionType.ATTACK:
@@ -1432,14 +1438,27 @@ export class MainScene extends Phaser.Scene {
     this.cameras.main.shake(duration, intensity / 10000);
   }
 
-  private flash(rect: Phaser.GameObjects.Rectangle, color: number): void {
-    const orig = rect === this.kaijuRect ? PAL.kaiju : PAL.player;
-    rect.setFillStyle(color);
-    this.time.delayedCall(120, () => rect.setFillStyle(orig));
+  /**
+   * Short color pulse on a combatant body. Rectangles swap their fill
+   * (currently only the kaiju side), Image sprites multiply a tint on
+   * top of their texture; both paths restore after a fixed 120 ms so
+   * we never leak a "stuck" color.
+   */
+  private flash(
+    target: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image,
+    color: number,
+  ): void {
+    if (target instanceof Phaser.GameObjects.Image) {
+      target.setTint(color);
+      this.time.delayedCall(120, () => target.clearTint());
+      return;
+    }
+    target.setFillStyle(color);
+    this.time.delayedCall(120, () => target.setFillStyle(PAL.kaiju));
   }
 
   private popText(
-    target: Phaser.GameObjects.Rectangle,
+    target: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image,
     text: string,
     color: string,
   ): void {

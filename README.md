@@ -4,7 +4,7 @@
 
 Pilot a giant combat **mech** and take down the **KAIJU (怪獣)** menace one beat at a time. Read the kaiju's incoming attack program, then counter-program your mech's response in time with the beat. Miss the rhythm and your slot defaults to IDLE — leaving you wide open.
 
-Built entirely with **Phaser 3 shapes and text** (no image assets) and a fully **procedural audio engine** built on the Web Audio API (no sample files).
+Built with **Phaser 3 shapes and text** (with the mech sprite as the first bespoke illustration; the rest is still procedural primitives) and a fully **procedural audio engine** built on the Web Audio API (no sample files).
 
 ## How to play
 
@@ -62,7 +62,7 @@ src/
   main.ts                # Phaser bootstrap (no physics — shapes & text only)
   scenes/
     BootScene.ts         # Scale refresh → Preloader
-    PreloaderScene.ts    # Asset loading (currently pass-through) → MainScene
+    PreloaderScene.ts    # Loads images (mech sprite, future kaiju art) → MainScene
     MainScene.ts         # Core game: rhythm sequencer, combat, VFX, game feel
   audio/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
@@ -71,7 +71,11 @@ src/
     safeArea.ts          # FIT-mode scale config + safe-area inset probe
     wavedash.ts          # Wavedash load-complete notification
 public/
-  assets/                # Drop real art/audio here when ready
+  assets/
+    images/
+      mech-player.png    # Player mech — Midjourney (flat vector style)
+    audio/               # Reserved for future sample banks
+    fonts/               # Reserved for webfont fallbacks
 ```
 
 ## Game architecture (MainScene.ts)
@@ -102,12 +106,13 @@ Rock-paper-scissors style resolution with Heat management. Each step is split ov
 | **COOL** | Vulnerable (mech -40) | Heat -40 | Heat -40 |
 | **SPECIAL** | Kaiju -40, Heat +80 | Break (kaiju -50) | Kaiju -40, Heat +80 |
 
-### VFX (all Phaser built-in, no assets)
+### VFX
 
 - **Damage popups**: Floating text that drifts up and fades (red for damage, blue for COOL, purple for SPECIAL)
 - **Camera shake**: Intensity and duration scale with damage (light for blocks, heavy for SPECIAL)
 - **Hit sparks**: Particle burst of coloured rectangles at point of impact
 - **Beat bounce**: Characters, labels, and buttons pulse scale 1.0 → 1.05 → 1.0 every beat
+- **Body flash**: The mech sprite flashes via `setTint`, the kaiju rectangle via `setFillStyle` — both restored after 120 ms from a single `flash()` helper
 
 ### Audio (Phase 2)
 
