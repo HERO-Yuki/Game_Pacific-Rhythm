@@ -22,6 +22,19 @@ Built with **Phaser 3 shapes and text** plus a pair of bespoke Midjourney flat-v
 
 Each player beat has a **±200 ms** input window. Press within the window to register your action; miss it and the slot becomes IDLE (unprotected). Timing quality is logged as PERFECT / GOOD / OK.
 
+### Controls
+
+You can mix and match input devices at any time — every scheme routes through the same `onActionClick()` timing gate, so touch, mouse, and keyboard feel identical.
+
+| Action | Button | Keyboard (left hand) | Keyboard (right hand) |
+| --- | --- | --- | --- |
+| ATTACK  | ATTACK  | **A** | **←** |
+| GUARD   | GUARD   | **S** | **↓** |
+| COOL    | COOL    | **D** | **→** |
+| SPECIAL | SPECIAL | **W** | **↑** |
+
+Action buttons carry the key hint underneath their label for discoverability, and their touch hit-zones extend ~6 px horizontally / ~20 px vertically past the visible rectangle for thumb-friendly taps on mobile. Arrow keys are captured so the embedding page never scrolls while the game has focus.
+
 ## Challenge alignment
 
 | Track | Implementation |

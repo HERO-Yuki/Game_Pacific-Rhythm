@@ -146,6 +146,34 @@ const ACT_SHORT: Record<ActionType, string> = {
   [ActionType.IDLE]: "IDL",
 };
 
+/**
+ * Keyboard shortcut hint rendered inside each action button.
+ * WASD for left-hand players, arrow keys for right-hand players —
+ * the game binds both sets to the same actions so either is fine.
+ */
+const ACT_KEY_HINT: Record<ActionType, string> = {
+  [ActionType.ATTACK]: "A / \u2190",
+  [ActionType.GUARD]: "S / \u2193",
+  [ActionType.COOL]: "D / \u2192",
+  [ActionType.SPECIAL]: "W / \u2191",
+  [ActionType.IDLE]: "",
+};
+
+/**
+ * Keyboard bindings for the four player actions. Strings here are
+ * `Phaser.Input.Keyboard.KeyCodes` names, so each action accepts a
+ * WASD key *or* its corresponding arrow key.
+ */
+const ACTION_KEY_BINDINGS: ReadonlyArray<{
+  readonly keys: readonly string[];
+  readonly action: ActionType;
+}> = [
+  { keys: ["A", "LEFT"], action: ActionType.ATTACK },
+  { keys: ["S", "DOWN"], action: ActionType.GUARD },
+  { keys: ["D", "RIGHT"], action: ActionType.COOL },
+  { keys: ["W", "UP"], action: ActionType.SPECIAL },
+];
+
 const KAIJU_POOL: ActionType[] = [
   ActionType.ATTACK,
   ActionType.GUARD,
@@ -317,6 +345,7 @@ export class MainScene extends Phaser.Scene {
     this.buildUI();
     this.cacheBounceTargets();
     this.refreshHUD();
+    this.setupKeyboardInput();
 
     this.scale.on("resize", this.onResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -587,24 +616,52 @@ export class MainScene extends Phaser.Scene {
       ActionType.COOL,
       ActionType.SPECIAL,
     ];
-    const bw = Math.min(120, W * 0.13);
-    const bh = 40;
-    const totalW = acts.length * bw + (acts.length - 1) * 12;
+    // Larger footprint sized for comfortable thumb taps on mobile;
+    // see HIT_PAD_* below for the invisible overflow that widens the
+    // touch target without growing the visual rectangle.
+    const bw = Math.min(148, W * 0.16);
+    const bh = 58;
+    const gap = 14;
+    // Horizontal pad stays small so neighbouring tap zones just touch
+    // (no overlap → no ambiguity); vertical pad is generous so thumbs
+    // landing slightly above or below the button still register.
+    const HIT_PAD_X = 6;
+    const HIT_PAD_Y = 20;
+    const totalW = acts.length * bw + (acts.length - 1) * gap;
     const x0 = (W - totalW) / 2 + bw / 2;
 
     this.btns = [];
     for (let i = 0; i < acts.length; i++) {
       const action = acts[i];
-      const bx = x0 + i * (bw + 12);
+      const bx = x0 + i * (bw + gap);
 
       const bg = this.add
         .rectangle(0, 0, bw, bh, PAL.btnOn)
         .setStrokeStyle(2, ACT_COL[action]);
-      const lbl = this.txt(0, 0, action, 13, "#e6edf3").setOrigin(0.5);
+      const lbl = this.txt(0, -9, action, 14, "#e6edf3").setOrigin(0.5);
+      const keyHint = this.txt(
+        0,
+        13,
+        ACT_KEY_HINT[action],
+        10,
+        "#8b949e",
+      ).setOrigin(0.5);
 
-      const ctr = this.add.container(bx, by, [bg, lbl]).setSize(bw, bh);
+      const ctr = this.add
+        .container(bx, by, [bg, lbl, keyHint])
+        .setSize(bw, bh);
+      const hitArea = new Phaser.Geom.Rectangle(
+        -bw / 2 - HIT_PAD_X,
+        -bh / 2 - HIT_PAD_Y,
+        bw + HIT_PAD_X * 2,
+        bh + HIT_PAD_Y * 2,
+      );
       ctr
-        .setInteractive({ useHandCursor: true })
+        .setInteractive({
+          hitArea,
+          hitAreaCallback: Phaser.Geom.Rectangle.Contains,
+          useHandCursor: true,
+        })
         .on("pointerover", () => {
           if (this.buttonsReady) bg.setFillStyle(PAL.btnHover);
         })
@@ -619,10 +676,50 @@ export class MainScene extends Phaser.Scene {
     this.txt(
       W / 2,
       by + bh / 2 + 14,
-      "Press in rhythm to program your sequence!",
+      "Tap or press WASD / arrow keys in rhythm to program your sequence.",
       11,
       "#4a5568",
     ).setOrigin(0.5, 0);
+  }
+
+  /**
+   * Wire WASD + arrow keys to the four action buttons.
+   *
+   * Routes every binding through `onActionClick`, so rhythm-window
+   * enforcement, IDLE-slot checks, and audio feedback stay identical
+   * between touch, click, and keyboard paths. Arrow keys are captured
+   * so the host page does not scroll while the game has focus.
+   */
+  private setupKeyboardInput(): void {
+    const kb = this.input.keyboard;
+    if (!kb) return;
+
+    kb.addCapture("UP,DOWN,LEFT,RIGHT,W,A,S,D");
+
+    for (const { keys, action } of ACTION_KEY_BINDINGS) {
+      for (const keyName of keys) {
+        const key = kb.addKey(keyName);
+        key.on("down", () => {
+          this.onActionClick(action);
+          this.flashButtonForAction(action);
+        });
+      }
+    }
+  }
+
+  /**
+   * Briefly highlight the button matching `action` so keyboard-only
+   * players get the same "you pressed the right thing" feedback that
+   * mouse hover already gives pointer players. Safe to call outside
+   * of rhythm phases — it is purely cosmetic.
+   */
+  private flashButtonForAction(action: ActionType): void {
+    const btn = this.btns.find((b) => b.action === action);
+    if (!btn) return;
+    btn.bg.setFillStyle(PAL.btnHover);
+    this.time.delayedCall(90, () => {
+      btn.bg.setFillStyle(this.buttonsReady ? PAL.btnOn : PAL.btnOff);
+    });
   }
 
   private buildGameOver(W: number, H: number): void {
