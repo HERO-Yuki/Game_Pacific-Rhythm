@@ -131,23 +131,33 @@ const PAL = {
   slotBg: 0x1a1f2e,
   slotStroke: 0x3d4663,
   highlight: 0xffcc00,
-  btnOn: 0x2a2f3e,
-  btnHover: 0x3a4f6e,
-  btnOff: 0x181c24,
-  /**
-   * Dark-red resting colour for the SPECIAL button. The visual alone
-   * warns the player "pick me carefully" before they even read the
-   * label — reinforced by the smaller footprint below.
-   */
-  specialBtnOn: 0x6b1818,
-  specialBtnHover: 0x8c2525,
-  specialBtnOff: 0x3c0d0d,
   hpGreen: 0x44cc44,
   heatOrange: 0xff6600,
   heatRed: 0xff0000,
   cursor: 0x00ffcc,
   miss: 0xff4444,
 } as const;
+
+/**
+ * Per-button palette triples (on / hover / off) keyed by visual
+ * theme. `default` drives ATTACK/GUARD/COOL; `special` paints the
+ * SPECIAL button a dark red so the most dangerous action is also
+ * visually tagged before the player even reads the label.
+ */
+const BTN_PAL = {
+  default: {
+    on: 0x2a2f3e,
+    hover: 0x3a4f6e,
+    off: 0x181c24,
+  },
+  special: {
+    on: 0x6b1818,
+    hover: 0x8c2525,
+    off: 0x3c0d0d,
+  },
+} as const;
+
+type BtnPalette = (typeof BTN_PAL)[keyof typeof BTN_PAL];
 
 const ACT_COL: Record<ActionType, number> = {
   [ActionType.ATTACK]: 0xff4444,
@@ -811,20 +821,11 @@ export class MainScene extends Phaser.Scene {
 
   /**
    * Palette triple used by a button in its on / hover / off states.
-   * SPECIAL gets the dark-red palette so the most dangerous action
+   * SPECIAL picks the dark-red theme so the most dangerous action
    * is also visually tagged before the player even reads the label.
    */
-  private buttonPalette(
-    action: ActionType,
-  ): { readonly on: number; readonly hover: number; readonly off: number } {
-    if (action === ActionType.SPECIAL) {
-      return {
-        on: PAL.specialBtnOn,
-        hover: PAL.specialBtnHover,
-        off: PAL.specialBtnOff,
-      };
-    }
-    return { on: PAL.btnOn, hover: PAL.btnHover, off: PAL.btnOff };
+  private buttonPalette(action: ActionType): BtnPalette {
+    return action === ActionType.SPECIAL ? BTN_PAL.special : BTN_PAL.default;
   }
 
   /** Press-in tween: snap down to 85% quickly for a weighty feel. */
@@ -2013,8 +2014,7 @@ export class MainScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
       .setDepth(DEPTH.popText)
-      .setScale(0.4)
-      .setAlpha(1);
+      .setScale(0.4);
 
     this.tweens.add({
       targets: t,
