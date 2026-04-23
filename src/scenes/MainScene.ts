@@ -1,6 +1,12 @@
 import Phaser from "phaser";
 import { audio } from "../audio/AudioManager";
 import {
+  DIFFICULTY_CONFIGS,
+  isEndless,
+  maxWavesForDifficulty,
+  type Difficulty,
+} from "../config/difficulty";
+import {
   BOSS_EVERY,
   KAIJU_STATS,
   pickKaijuRank,
@@ -15,7 +21,16 @@ import {
   type Weather,
   type WeatherEffect,
 } from "../config/weather";
+import {
+  saveEndlessRecord,
+  saveTimedRecord,
+  type EndlessRecord,
+} from "../utils/records";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
+
+export interface MainSceneInitData {
+  difficulty?: Difficulty;
+}
 
 /* ===================================================================
  *  Pacific Rhythm — core game scene
@@ -49,6 +64,7 @@ enum GamePhase {
   RHYTHM_PLAYER,
   RESOLUTION,
   GAME_OVER,
+  GAME_CLEAR,
 }
 
 // ======================== Constants ========================
@@ -321,6 +337,23 @@ export class MainScene extends Phaser.Scene {
   /** 1-based wave index. Increments at the start of every beginWave(). */
   private wave = 0;
   /**
+   * Difficulty chosen on the title screen. Drives:
+   *   - whether weather rolls or stays clear (EASY skips it)
+   *   - the wave cap that flips the game into GAME CLEAR
+   *   - which persistence helper runs on end-of-run
+   * Defaults to NORMAL so a direct `scene.start("MainScene")` boot
+   * (e.g. from dev tools) still gets the intended experience.
+   */
+  private difficulty: Difficulty = "normal";
+  /** Maximum wave for the current difficulty, or Infinity for endless. */
+  private maxWave = Infinity;
+  /** Wall-clock ms captured at beginWave(1) — used for clear-time records. */
+  private runStartTime = 0;
+  /** Cleared-boss counter (ENDLESS best-score bookkeeping). */
+  private bossesDefeated = 0;
+  /** Cleared-giga counter (ENDLESS best-score bookkeeping). */
+  private gigasDefeated = 0;
+  /**
    * 0-based weather-phase index (every `BOSS_EVERY` waves is one
    * phase). -1 forces a re-roll on the very first wave so
    * `refreshWeatherHUD()` always runs at least once before combat.
@@ -434,6 +467,19 @@ export class MainScene extends Phaser.Scene {
   /*  Lifecycle                                                     */
   /* ============================================================ */
 
+  /**
+   * Called by Phaser before create() — perfect home for interpreting
+   * the data payload from TitleScene. Falls back to NORMAL when the
+   * scene is started without explicit data so the game still boots
+   * cleanly from `scene.start("MainScene")`.
+   */
+  init(data: MainSceneInitData | undefined): void {
+    const requested = data?.difficulty;
+    this.difficulty =
+      requested && requested in DIFFICULTY_CONFIGS ? requested : "normal";
+    this.maxWave = maxWavesForDifficulty(this.difficulty);
+  }
+
   create(): void {
     this.resetState();
     this.cameras.main.setBackgroundColor(PAL.bg);
@@ -485,6 +531,9 @@ export class MainScene extends Phaser.Scene {
     this.currentWeather = "clear";
     this.kaijuNoiseMask = [];
     this.score = 0;
+    this.bossesDefeated = 0;
+    this.gigasDefeated = 0;
+    this.runStartTime = 0;
     this.ohStreak = 0;
     this.phase = GamePhase.RHYTHM_KAIJU;
     this.kaijuSeq = [];
@@ -514,10 +563,8 @@ export class MainScene extends Phaser.Scene {
     const H = this.scale.height;
 
     this.phaseLabel = this.txt(W / 2, 16, "", 18, "#8b949e").setOrigin(0.5, 0);
-    this.scoreLabel = this.txt(W - 20, 16, "SCORE: 0", 15, "#6e7681").setOrigin(
-      1,
-      0,
-    );
+    this.scoreLabel = this.txt(W - 20, 16, "", 15, "#6e7681").setOrigin(1, 0);
+    this.refreshProgressHUD();
     // Weather indicator lives on the otherwise empty top-left shelf.
     // Two stacked lines so the modifier summary is legible at a glance
     // without crowding the headline.
@@ -899,33 +946,184 @@ export class MainScene extends Phaser.Scene {
     const dim = this.add
       .rectangle(0, 0, W, H, 0x000000, 0.8)
       .setOrigin(0);
+    // Absorb any clicks that fall between the RETRY / BACK TO TITLE
+    // buttons so combat buttons behind the overlay can't be mis-fired
+    // on the last frame before a RETRY rebuilds the scene.
+    dim.setInteractive();
     const title = this.add
-      .text(W / 2, H / 2 - 40, "GAME OVER", {
+      .text(W / 2, H / 2 - 76, "GAME OVER", {
         fontFamily: FONT,
         fontSize: "42px",
         color: "#ff4444",
         fontStyle: "bold",
       })
       .setOrigin(0.5);
-    this.goScoreText = this.txt(W / 2, H / 2 + 16, "", 22, "#e6edf3").setOrigin(
-      0.5,
+    this.goScoreText = this.txt(W / 2, H / 2 - 8, "", 18, "#e6edf3")
+      .setOrigin(0.5)
+      .setAlign("center");
+
+    // Two-button row: RETRY (same difficulty) on the left,
+    // BACK TO TITLE on the right. Sized for comfortable thumb taps.
+    const retry = this.makeMenuButton(
+      W / 2 - 110,
+      H / 2 + 68,
+      "RETRY",
+      0x2a354e,
+      () => this.scene.restart({ difficulty: this.difficulty }),
     );
-    const hint = this.txt(
-      W / 2,
-      H / 2 + 56,
-      "Click to Restart",
-      14,
-      "#8b949e",
-    ).setOrigin(0.5);
+    const back = this.makeMenuButton(
+      W / 2 + 110,
+      H / 2 + 68,
+      "BACK TO TITLE",
+      0x1a1f2e,
+      () => this.scene.start("TitleScene"),
+    );
+
     this.goLayer = this.add.container(0, 0, [
       dim,
       title,
       this.goScoreText,
-      hint,
+      retry,
+      back,
     ]);
     this.goLayer.setVisible(false).setDepth(DEPTH.gameOver);
-    dim.setInteractive().on("pointerdown", () => {
-      if (this.phase === GamePhase.GAME_OVER) this.scene.restart();
+  }
+
+  /**
+   * Compact "menu" button (used by the game-over overlay). Uses the
+   * same press/release tween language as the combat buttons so the
+   * whole game feels consistent at every layer.
+   */
+  private makeMenuButton(
+    x: number,
+    y: number,
+    label: string,
+    fill: number,
+    onClick: () => void,
+  ): Phaser.GameObjects.Container {
+    const bw = 180;
+    const bh = 42;
+    const bg = this.add
+      .rectangle(0, 0, bw, bh, fill)
+      .setStrokeStyle(2, 0x3d4663);
+    const lbl = this.txt(0, 0, label, 15, "#e6edf3").setOrigin(0.5);
+    const ctr = this.add.container(x, y, [bg, lbl]);
+    ctr.setSize(bw, bh);
+    ctr.setInteractive(
+      new Phaser.Geom.Rectangle(-bw / 2, -bh / 2, bw, bh),
+      Phaser.Geom.Rectangle.Contains,
+    );
+    ctr.on("pointerover", () => bg.setStrokeStyle(2, 0xffcc00));
+    ctr.on("pointerout", () => bg.setStrokeStyle(2, 0x3d4663));
+    ctr.on("pointerdown", () => {
+      this.pressButtonTween(ctr);
+    });
+    ctr.on("pointerup", () => {
+      this.releaseButtonTween(ctr);
+      onClick();
+    });
+    return ctr;
+  }
+
+  /**
+   * Celebration overlay for a completed EASY / NORMAL run. Big gold
+   * headline, clear-time readout, wave/boss/giga summary, and an
+   * optional "NEW BEST" badge. Auto-fades into the title transition
+   * handled by `returnToTitle()`.
+   */
+  private showGameClearOverlay(timeMs: number, improved: boolean): void {
+    const W = this.scale.width;
+    const H = this.scale.height;
+    const dim = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0.78)
+      .setOrigin(0)
+      .setDepth(DEPTH.gameOver);
+    // Block pass-through clicks while the clear overlay plays so the
+    // player can't accidentally poke a stale combat button mid-fade.
+    dim.setInteractive();
+
+    const title = this.add
+      .text(W / 2, H / 2 - 80, "GAME CLEAR", {
+        fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
+        fontSize: "52px",
+        color: "#ffd166",
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.gameOver)
+      .setShadow(0, 3, "#ff9a1f", 14, false, true)
+      .setScale(0.6);
+
+    const mm = Math.floor(timeMs / 60000);
+    const ss = Math.floor((timeMs % 60000) / 1000)
+      .toString()
+      .padStart(2, "0");
+    const sub = this.add
+      .text(
+        W / 2,
+        H / 2 - 12,
+        `${this.difficulty.toUpperCase()}  \u00B7  TIME ${mm}:${ss}`,
+        {
+          fontFamily: FONT,
+          fontSize: "20px",
+          color: "#e6edf3",
+        },
+      )
+      .setOrigin(0.5)
+      .setDepth(DEPTH.gameOver);
+
+    const stats = this.add
+      .text(
+        W / 2,
+        H / 2 + 22,
+        `Waves ${this.wave}  \u00B7  Bosses ${this.bossesDefeated}` +
+          `  \u00B7  Gigas ${this.gigasDefeated}`,
+        {
+          fontFamily: FONT,
+          fontSize: "15px",
+          color: "#8b949e",
+        },
+      )
+      .setOrigin(0.5)
+      .setDepth(DEPTH.gameOver);
+
+    if (improved) {
+      const best = this.add
+        .text(W / 2, H / 2 + 58, "\u2728 NEW BEST TIME", {
+          fontFamily: FONT,
+          fontSize: "16px",
+          color: "#ffd166",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5)
+        .setDepth(DEPTH.gameOver);
+      this.tweens.add({
+        targets: best,
+        alpha: { from: 0.6, to: 1 },
+        duration: 520,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+    }
+
+    const hint = this.add
+      .text(W / 2, H - 40, "returning to title\u2026", {
+        fontFamily: FONT,
+        fontSize: "12px",
+        color: "#6e7681",
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.gameOver);
+
+    this.tweens.add({
+      targets: title,
+      scale: { from: 0.6, to: 1 },
+      duration: 480,
+      ease: "Back.easeOut",
+    });
+    [dim, sub, stats, hint].forEach((o) => {
+      o.setAlpha(0);
+      this.tweens.add({ targets: o, alpha: 1, duration: 480 });
     });
   }
 
@@ -1017,15 +1215,25 @@ export class MainScene extends Phaser.Scene {
 
   private beginWave(): void {
     this.wave += 1;
+    if (this.wave === 1) {
+      // Anchor the run clock on the very first wave of the encounter.
+      // `resetState()` already zeroes this, but reading `time.now` here
+      // keeps the accounting correct after scene restarts where create()
+      // and beginWave may land on different frames.
+      this.runStartTime = this.time.now;
+    }
     const rank = pickKaijuRank(this.wave);
     this.applyKaijuRank(rank);
     this.rollWeatherForWave();
     this.refreshHUD();
+    this.refreshProgressHUD();
     const maskedIdx = this.kaijuNoiseMask
       .map((m, i) => (m ? i : -1))
       .filter((i) => i >= 0);
     console.log(
-      `[Wave ${this.wave}] ${rank.toUpperCase()} — HP ${this.kaijuHP} — ` +
+      `[Wave ${this.wave}${
+        this.maxWave === Infinity ? "" : `/${this.maxWave}`
+      }] ${rank.toUpperCase()} — HP ${this.kaijuHP} — ` +
         `WEATHER ${this.currentWeather.toUpperCase()}` +
         (maskedIdx.length > 0 ? ` (mask ${maskedIdx.join(",")})` : ""),
     );
@@ -1047,7 +1255,12 @@ export class MainScene extends Phaser.Scene {
     const phaseIdx = Math.floor((this.wave - 1) / BOSS_EVERY);
     if (phaseIdx !== this.currentPhaseIndex) {
       this.currentPhaseIndex = phaseIdx;
-      this.currentWeather = pickWeather(phaseIdx);
+      // EASY disables weather entirely so new players can focus on
+      // the core rhythm; the HUD still runs so the placeholder panel
+      // shows a consistent "CLEAR" summary.
+      this.currentWeather = DIFFICULTY_CONFIGS[this.difficulty].hasWeather
+        ? pickWeather(phaseIdx)
+        : "clear";
       this.refreshWeatherHUD();
     }
     const eff = this.weatherEffect();
@@ -1693,8 +1906,30 @@ export class MainScene extends Phaser.Scene {
     // Stay in RESOLUTION during the blink animation to prevent
     // updateRhythm from running with stale timing state.
     this.score++;
-    this.scoreLabel.setText(`SCORE: ${this.score}`);
-    console.log(`[Wave] Defeated! Score: ${this.score}`);
+    // Bookkeep rank kills so ENDLESS best-record writes have accurate
+    // numbers, and so we can show "N bosses / N gigas" on clear.
+    const rank = pickKaijuRank(this.wave);
+    if (rank === "boss") this.bossesDefeated += 1;
+    else if (rank === "giga") this.gigasDefeated += 1;
+    console.log(
+      `[Wave ${this.wave}] ${rank.toUpperCase()} defeated — Score: ${this.score}`,
+    );
+
+    // Finite-length runs: the final wave clear triggers GAME CLEAR
+    // instead of spinning up another encounter. ENDLESS returns
+    // `Infinity`, so this branch is only reachable for EASY / NORMAL.
+    if (this.wave >= this.maxWave) {
+      this.tweens.add({
+        targets: this.kaijuBody,
+        alpha: 0,
+        duration: 80,
+        yoyo: true,
+        repeat: 6,
+        onComplete: () =>
+          this.time.delayedCall(400, () => this.triggerGameClear()),
+      });
+      return;
+    }
 
     this.tweens.add({
       targets: this.kaijuBody,
@@ -1719,14 +1954,95 @@ export class MainScene extends Phaser.Scene {
     this.setPhaseDisplay("GAME OVER", "#ff4444");
     console.log(`[GameOver] ${reason} | Score: ${this.score}`);
 
-    this.goScoreText.setText(`Score: ${this.score}  \u2014 ${reason}`);
+    // Only ENDLESS writes records on game-over; EASY / NORMAL only
+    // count as "best" when a run is completed (handled in
+    // triggerGameClear). Keep best-tracking side-effects here so
+    // every "run ends" path goes through endGame.
+    let bestLine = "";
+    if (isEndless(this.difficulty)) {
+      // `this.score` already counts waves fully cleared (incremented
+      // inside onWaveWin, before any defeat branch). Using it keeps
+      // the record free of half-finished waves.
+      const run: EndlessRecord = {
+        waves: this.score,
+        bosses: this.bossesDefeated,
+        gigas: this.gigasDefeated,
+      };
+      const improved = saveEndlessRecord(run);
+      bestLine =
+        `\nWaves ${run.waves}  \u00B7  Bosses ${run.bosses}  \u00B7  Gigas ${run.gigas}` +
+        (improved ? "    \u2728 NEW BEST" : "");
+    }
+
+    this.goScoreText.setText(
+      `Score: ${this.score}  \u2014 ${reason}${bestLine}`,
+    );
     this.goLayer.setVisible(true).setAlpha(0);
     this.tweens.add({ targets: this.goLayer, alpha: 1, duration: 600 });
+  }
+
+  /**
+   * Finite-length win flow for EASY / NORMAL. We never reach here for
+   * ENDLESS (its `maxWave` is `Infinity`). Persists the clear time,
+   * shows a brief celebration overlay, then returns to the title so
+   * the player can pick a new difficulty without a click.
+   */
+  private triggerGameClear(): void {
+    this.phase = GamePhase.GAME_CLEAR;
+    this.rhythmCursor.setVisible(false);
+    this.timingBar.setVisible(false);
+    this.buttonsReady = false;
+    this.cancelHitStop();
+    this.clearHeatAlert();
+    this.heatDangerActive = false;
+
+    const timeMs = Math.max(0, this.time.now - this.runStartTime);
+    const improved =
+      this.difficulty === "easy" || this.difficulty === "normal"
+        ? saveTimedRecord(this.difficulty, timeMs)
+        : false;
+
+    this.setPhaseDisplay("GAME CLEAR", "#ffd166");
+    console.log(
+      `[GameClear] ${this.difficulty.toUpperCase()} ${timeMs}ms — ` +
+        `W${this.wave} B${this.bossesDefeated} G${this.gigasDefeated}` +
+        (improved ? " (NEW BEST)" : ""),
+    );
+
+    this.showGameClearOverlay(timeMs, improved);
+
+    // Brief celebration, then bounce back to the title so the player
+    // can reselect difficulty without an extra click.
+    const RETURN_DELAY = 3200;
+    this.time.delayedCall(RETURN_DELAY, () => this.returnToTitle());
+  }
+
+  private returnToTitle(): void {
+    this.cameras.main.fadeOut(300, 0, 0, 0);
+    this.cameras.main.once(
+      Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE,
+      () => this.scene.start("TitleScene"),
+    );
   }
 
   /* ============================================================ */
   /*  HUD helpers                                                   */
   /* ============================================================ */
+
+  /**
+   * Paints the top-right wave counter. Finite runs show the goal
+   * (`WAVE 3/15`) so the player always knows how close they are to
+   * clearing; ENDLESS just shows the raw count since there is no cap.
+   */
+  private refreshProgressHUD(): void {
+    const cap = this.maxWave;
+    if (cap === Infinity) {
+      this.scoreLabel.setText(`WAVE ${Math.max(1, this.wave)}`);
+    } else {
+      const shown = Math.min(Math.max(1, this.wave), cap);
+      this.scoreLabel.setText(`WAVE ${shown}/${cap}`);
+    }
+  }
 
   private refreshHUD(): void {
     const kh = Math.max(0, this.kaijuHP);
@@ -1768,7 +2084,15 @@ export class MainScene extends Phaser.Scene {
    * the alert directly.
    */
   private updateHeatDangerUI(heat: number): void {
-    if (this.phase === GamePhase.GAME_OVER) return;
+    // Suppress both directions once the run is over in either state:
+    // a meltdown should not show a "you're safe!" flash, and the
+    // end-of-run handlers already tear down the alert directly.
+    if (
+      this.phase === GamePhase.GAME_OVER ||
+      this.phase === GamePhase.GAME_CLEAR
+    ) {
+      return;
+    }
 
     const nowDanger = heat >= HEAT_DANGER;
     if (nowDanger === this.heatDangerActive) return;

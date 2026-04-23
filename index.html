@@ -8,6 +8,19 @@
     />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>Pacific Rhythm — Gamedev.js Jam 2026</title>
+    <!--
+      Title-screen typeface. We use preconnect + display=swap so the
+      fallback (Impact / Arial Black) paints immediately, then upgrades
+      to Dela Gothic One once the Google Font arrives. TitleScene
+      listens on document.fonts.ready to force a canvas re-rasterise
+      once the real face lands.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&display=swap"
+      rel="stylesheet"
+    />
     <style>
       *,
       *::before,

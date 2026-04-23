@@ -3,6 +3,7 @@ import Phaser from "phaser";
 import { BootScene } from "./scenes/BootScene";
 import { MainScene } from "./scenes/MainScene";
 import { PreloaderScene } from "./scenes/PreloaderScene";
+import { TitleScene } from "./scenes/TitleScene";
 import { getGameScaleConfig } from "./utils/safeArea";
 
 /**
@@ -37,7 +38,7 @@ function createGame(): Phaser.Game {
       target: 60,
       smoothStep: true,
     },
-    scene: [BootScene, PreloaderScene, MainScene],
+    scene: [BootScene, PreloaderScene, TitleScene, MainScene],
   });
 }
 

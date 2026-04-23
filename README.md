@@ -8,16 +8,27 @@ Built with **Phaser 3 shapes and text** plus a pair of bespoke Midjourney flat-v
 
 ## How to play
 
-1. **Reading phase** (beats 1-4): The kaiju's 4-action attack sequence is revealed one slot per beat at BPM 60.
-2. **Programming phase** (beats 5-8): Press an action button in sync with each beat to program your mech's counter-sequence.
+1. **Pick a difficulty** on the title screen — EASY, NORMAL, or ENDLESS. The selection drives run length, whether the weather system is active, and which best-record field the end-of-run celebration writes to.
+2. **Reading phase** (beats 1-4): The kaiju's 4-action attack sequence is revealed one slot per beat at BPM 60.
+3. **Programming phase** (beats 5-8): Press an action button in sync with each beat to program your mech's counter-sequence.
    - **ATTACK** — deals damage; countered by GUARD
    - **GUARD** — blocks the kaiju's ATTACK; no effect otherwise
    - **COOL** — reduces Heat by 40; vulnerable to ATTACK (double damage)
    - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
-3. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
-4. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
-5. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. How many waves can your pilot survive?
-6. **Weather**: Every **3-wave phase** (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK-25% / COOL+50%), `SAND` (one kaiju slot masked as `?`), or `DROUGHT` (Heat gain +50%). The active weather is shown in the top-left HUD and stays locked for the whole phase; Phase 1 is always CLEAR so newcomers meet the core loop first.
+4. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
+5. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
+6. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. EASY ends at wave 15, NORMAL at wave 21, ENDLESS never ends.
+7. **Weather** (NORMAL / ENDLESS only): Every **3-wave phase** (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK-25% / COOL+50%), `SAND` (one kaiju slot masked as `?`), or `DROUGHT` (Heat gain +50%). The active weather is shown in the top-left HUD and stays locked for the whole phase; Phase 1 is always CLEAR so newcomers meet the core loop first. EASY disables the system entirely so learners only have to read the rhythm.
+
+### Difficulty
+
+| Difficulty | Phases | Waves | Weather | Best-record metric |
+| --- | --- | --- | --- | --- |
+| **EASY**    | 5         | 15        | disabled (always CLEAR) | Fastest clear time |
+| **NORMAL**  | 7         | 21        | enabled                 | Fastest clear time |
+| **ENDLESS** | unlimited | unlimited | enabled                 | Highest waves / bosses / gigas |
+
+Records live under `localStorage` (`pacificRhythm:bestRecords:v1`) and are shown underneath each button on the title screen (`BEST: —` until you clear a run). Each field is tracked independently for ENDLESS, so a long run with fewer bosses defeated doesn't overwrite a shorter run that bagged more bosses. EASY / NORMAL record the fastest completion time.
 
 ### Input timing
 
@@ -44,7 +55,7 @@ When an action lands in the 4-slot programme, the slot's border snaps to pure wh
 
 | Track | Implementation |
 | --- | --- |
-| **Build it with Phaser** | Phaser 3.88 + TypeScript + Vite; scenes `Boot` → `Preloader` → `MainScene` |
+| **Build it with Phaser** | Phaser 3.88 + TypeScript + Vite; scenes `Boot` → `Preloader` → `Title` → `MainScene` |
 | **Open Source by GitHub** | MIT `LICENSE`, permissive structure for forks |
 | **Deploy to Wavedash** | `wavedash.toml` + `wavedash.json`; production bundle emits `dist/game.js` |
 | **YouTube Playables** | `Scale.FIT` + `CENTER_BOTH` on a 960×540 (16:9) design, `viewport-fit=cover`, safe-area padding |
@@ -80,15 +91,18 @@ src/
   main.ts                # Phaser bootstrap (no physics — shapes & text only)
   scenes/
     BootScene.ts         # Scale refresh → Preloader
-    PreloaderScene.ts    # Loads images (mech sprite, future kaiju art) → MainScene
+    PreloaderScene.ts    # Loads images (mech sprite, future kaiju art) → Title
+    TitleScene.ts        # Difficulty picker + best-record preview → MainScene
     MainScene.ts         # Core game: rhythm sequencer, combat, VFX, game feel
   audio/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   config/
+    difficulty.ts        # Difficulty configs (phases / weather gate) + helpers
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
   web3/                  # Ethereum integration stubs
   utils/
+    records.ts           # localStorage-backed best-record persistence
     safeArea.ts          # FIT-mode scale config + safe-area inset probe
     wavedash.ts          # Wavedash load-complete notification
 public/
@@ -107,8 +121,10 @@ public/
 ### Phases
 
 ```
-RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
+RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER)
 ```
+
+`GAME_CLEAR` fires only when the wave counter reaches the difficulty's cap (EASY 15 / NORMAL 21); ENDLESS bypasses it entirely. `GAME_OVER` still routes through the same overlay for meltdown / HP depletion on every difficulty.
 
 ### Rhythm timing
 
