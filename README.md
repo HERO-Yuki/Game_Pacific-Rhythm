@@ -55,8 +55,10 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 
 ### Ethereum by OP Guild
 
-- **Provider detection + connect / transaction stubs** live in [`src/web3/`](src/web3/) as a small, typed interface (`getEthereumReadiness()`, `connectWalletPlaceholder()`, `sendTransactionPlaceholder()`). Window-level `ethereum` detection is already wired, ready to be backed by viem, ethers, or wagmi in a follow-up.
-- **On-chain score foundation** — the title-screen's best-record layer ([`src/utils/records.ts`](src/utils/records.ts)) writes under a single versioned key (`pacificRhythm:bestRecords:v1`) with a schema designed to map cleanly onto a leaderboard contract: `EndlessRecord { waves, bosses, gigas }` for ENDLESS, `TimedClearRecord { timeMs }` for EASY / NORMAL. Swapping the `localStorage` backend for an on-chain read/write is a one-file change.
+- **Live wallet flow on GAME OVER** — the game-over overlay now ships a two-step Ethereum attestation UX built entirely on the vanilla EIP-1193 `window.ethereum` API (no `ethers` / `viem` / `wagmi` added to the bundle). `[ Connect Web3 Wallet ]` calls `eth_requestAccounts`, then `[ Submit Score to Ethereum ]` requests a `personal_sign` over a human-readable run summary (score + timestamp + address). The returned signature is logged and a gold "Score Submitted!" pop celebrates the attestation. See [`src/web3/WalletManager.ts`](src/web3/WalletManager.ts) — every RPC call is wrapped in a discriminated-union `WalletResult<T>` so rejection (EIP-1193 code `4001`) is distinguished from "no provider installed" and unknown failures.
+- **Gas-free, verifiable foundation** — `personal_sign` produces a signature that any future leaderboard contract can validate via `ecrecover`. No transaction is broadcast, no network is required, and the player pays no gas. This is exactly the "first step to on-chain score recording" the challenge asks for: the authentication primitive is already live.
+- **Provider detection + pre-existing stubs** remain available for richer flows — `getEthereumReadiness()`, `connectWalletPlaceholder()`, `sendTransactionPlaceholder()` are re-exported from [`src/web3/index.ts`](src/web3/index.ts) alongside the new `wallet` singleton.
+- **On-chain score schema foundation** — the title-screen's best-record layer ([`src/utils/records.ts`](src/utils/records.ts)) writes under a single versioned key (`pacificRhythm:bestRecords:v1`) with a schema designed to map cleanly onto a leaderboard contract: `EndlessRecord { waves, bosses, gigas }` for ENDLESS, `TimedClearRecord { timeMs }` for EASY / NORMAL. Swapping the `localStorage` backend for an on-chain read/write is a one-file change.
 
 ### Open Source by GitHub
 
@@ -291,7 +293,10 @@ src/
     difficulty.ts        # Difficulty configs (phases / weather gate) + helpers
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
-  web3/                  # Ethereum integration stubs (wallet detection + hooks)
+  web3/
+    WalletManager.ts     # EIP-1193 connect + personal_sign score attestation
+    types.ts             # Shared EthereumProvider + Window.ethereum augmentation
+    wallet.ts            # Legacy detection / transaction stubs
   utils/
     records.ts           # localStorage-backed best-record persistence
     safeArea.ts          # FIT-mode scale config + safe-area inset probe

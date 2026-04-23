@@ -4,3 +4,11 @@ export {
   getEthereumReadiness,
   sendTransactionPlaceholder,
 } from "./wallet";
+export {
+  wallet,
+  WalletManager,
+  type ConnectPayload,
+  type SubmitPayload,
+  type WalletErrorCode,
+  type WalletResult,
+} from "./WalletManager";

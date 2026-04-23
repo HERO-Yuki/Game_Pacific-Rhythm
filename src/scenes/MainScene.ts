@@ -27,6 +27,7 @@ import {
   type EndlessRecord,
 } from "../utils/records";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
+import { wallet, WalletManager } from "../web3/WalletManager";
 
 export interface MainSceneInitData {
   difficulty?: Difficulty;
@@ -431,6 +432,17 @@ export class MainScene extends Phaser.Scene {
   private msgLabel!: Phaser.GameObjects.Text;
   private goLayer!: Phaser.GameObjects.Container;
   private goScoreText!: Phaser.GameObjects.Text;
+  /* Game-over Web3 integration refs — only visible on the GO overlay. */
+  private goWalletBtn?: Phaser.GameObjects.Container;
+  private goWalletBtnLabel?: Phaser.GameObjects.Text;
+  private goSubmitBtn?: Phaser.GameObjects.Container;
+  private goWeb3Status?: Phaser.GameObjects.Text;
+  /**
+   * Latches `true` when a signature has been collected for the
+   * current run, so the player cannot spam the signing popup if
+   * they tap "Submit" multiple times in rapid succession.
+   */
+  private scoreSubmitted = false;
   private barMaxW = 0;
 
   /* rhythm UI */
@@ -545,6 +557,7 @@ export class MainScene extends Phaser.Scene {
     this.ohAlarmedThisTurn = false;
     this.hitStopActive = false;
     this.heatDangerActive = false;
+    this.scoreSubmitted = false;
   }
 
   private isRhythmPhase(): boolean {
@@ -979,14 +992,193 @@ export class MainScene extends Phaser.Scene {
       () => this.scene.start("TitleScene"),
     );
 
+    // ---- Web3 panel ----------------------------------------------
+    // Optional Ethereum score-attestation flow (OP Guild challenge).
+    // Rendered below the primary retry/back row so the core loop
+    // stays dominant; falls back to a plain "no wallet" status line
+    // when the browser has no EIP-1193 provider injected.
+    const connectBtn = this.makeMenuButton(
+      W / 2,
+      H / 2 + 128,
+      "[ Connect Web3 Wallet ]",
+      0x2b3a66,
+      () => this.onConnectWalletClick(),
+      { width: 260, height: 36, color: "#a9c4ff" },
+    );
+    this.goWalletBtn = connectBtn;
+    // The container's label is the 2nd child (see makeMenuButton order).
+    this.goWalletBtnLabel = connectBtn.list[1] as Phaser.GameObjects.Text;
+
+    const submitBtn = this.makeMenuButton(
+      W / 2,
+      H / 2 + 168,
+      "[ Submit Score to Ethereum ]",
+      0x3a2b66,
+      () => this.onSubmitScoreClick(),
+      { width: 260, height: 36, color: "#ffd166" },
+    );
+    submitBtn.setVisible(false).setActive(false);
+    this.goSubmitBtn = submitBtn;
+
+    this.goWeb3Status = this.txt(W / 2, H / 2 + 202, "", 12, "#8a95a8")
+      .setOrigin(0.5)
+      .setAlign("center");
+
     this.goLayer = this.add.container(0, 0, [
       dim,
       title,
       this.goScoreText,
       retry,
       back,
+      connectBtn,
+      submitBtn,
+      this.goWeb3Status,
     ]);
     this.goLayer.setVisible(false).setDepth(DEPTH.gameOver);
+  }
+
+  /**
+   * Reconcile the Web3 widgets with the live `wallet` singleton
+   * state and the current run's submission latch. Called whenever
+   * the GO overlay is shown, and after any connect/submit RPC
+   * finishes, so the UI always reflects what the user can do next.
+   */
+  private refreshWeb3UI(): void {
+    if (!this.goWalletBtn || !this.goWalletBtnLabel || !this.goSubmitBtn) {
+      return;
+    }
+    const addr = wallet.getAddress();
+    if (addr) {
+      this.goWalletBtnLabel.setText(
+        `\u2713 ${WalletManager.shortAddress(addr)}`,
+      );
+      this.goSubmitBtn.setVisible(!this.scoreSubmitted);
+      this.goSubmitBtn.setActive(!this.scoreSubmitted);
+    } else {
+      this.goWalletBtnLabel.setText("[ Connect Web3 Wallet ]");
+      this.goSubmitBtn.setVisible(false);
+      this.goSubmitBtn.setActive(false);
+    }
+  }
+
+  /**
+   * Short, non-disruptive status line shown under the Web3 buttons.
+   * `tone: "error"` paints it red so rejection / missing-wallet cases
+   * are unmissable without yanking the player out of the overlay.
+   */
+  private setWeb3Status(text: string, tone: "info" | "error" = "info"): void {
+    if (!this.goWeb3Status) return;
+    this.goWeb3Status.setText(text);
+    this.goWeb3Status.setColor(tone === "error" ? "#ff9b9b" : "#8a95a8");
+  }
+
+  /**
+   * Handler for the [ Connect Web3 Wallet ] button. Idempotent: if
+   * the wallet is already connected, just re-syncs the UI instead of
+   * re-prompting the user.
+   */
+  private async onConnectWalletClick(): Promise<void> {
+    if (wallet.getAddress()) {
+      this.refreshWeb3UI();
+      return;
+    }
+    this.setWeb3Status("Opening wallet\u2026");
+    const result = await wallet.connectWallet();
+    if (result.ok) {
+      this.setWeb3Status(
+        `Wallet connected: ${WalletManager.shortAddress(result.data.address)}`,
+      );
+    } else if (result.code === "no-provider") {
+      this.setWeb3Status(
+        "No Ethereum wallet detected. Install MetaMask to submit.",
+        "error",
+      );
+      console.warn("[Web3] connect failed:", result.message);
+    } else if (result.code === "user-rejected") {
+      this.setWeb3Status("Connection cancelled.", "error");
+    } else {
+      this.setWeb3Status(
+        "Wallet connection failed. See console for details.",
+        "error",
+      );
+      console.warn("[Web3] connect failed:", result.message);
+    }
+    this.refreshWeb3UI();
+  }
+
+  /**
+   * Handler for the [ Submit Score to Ethereum ] button. Requests a
+   * `personal_sign` over the run summary so the score can be verified
+   * off-chain via `ecrecover` — a minimal, gas-free foundation for a
+   * future on-chain leaderboard contract.
+   */
+  private async onSubmitScoreClick(): Promise<void> {
+    if (this.scoreSubmitted) return;
+    const addr = wallet.getAddress();
+    if (!addr) {
+      this.setWeb3Status("Connect a wallet first.", "error");
+      return;
+    }
+    this.setWeb3Status("Awaiting signature\u2026");
+    const result = await wallet.submitScore(this.score, addr);
+    if (result.ok) {
+      this.scoreSubmitted = true;
+      this.setWeb3Status(
+        `Signed at ${new Date().toLocaleTimeString()} \u00B7 ${result.data.signature.slice(
+          0,
+          10,
+        )}\u2026`,
+      );
+      this.showScoreSubmittedPopup();
+      console.log("[Web3] score signature:", result.data.signature);
+      console.log("[Web3] signed message:", result.data.message);
+    } else if (result.code === "user-rejected") {
+      this.setWeb3Status("Signature cancelled.", "error");
+    } else {
+      this.setWeb3Status(
+        "Signature failed. See console for details.",
+        "error",
+      );
+      console.warn("[Web3] sign failed:", result.message);
+    }
+    this.refreshWeb3UI();
+  }
+
+  /**
+   * Gold "Score Submitted!" celebration pop. Mirrors `showPraise()`
+   * visually but lives on the game-over layer depth so it does not
+   * hide behind the GO dim rectangle.
+   */
+  private showScoreSubmittedPopup(): void {
+    const cx = this.scale.width / 2;
+    const cy = this.scale.height / 2;
+    const t = this.add
+      .text(cx, cy, "Score Submitted!", {
+        fontFamily: FONT,
+        fontSize: "40px",
+        color: "#ffd24a",
+        fontStyle: "bold",
+        stroke: "#3b1d00",
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.gameOver + 1)
+      .setScale(0.4);
+
+    this.tweens.add({
+      targets: t,
+      scale: { from: 0.4, to: 1.2 },
+      duration: 260,
+      ease: "Back.easeOut",
+    });
+    this.tweens.add({
+      targets: t,
+      y: cy - 80,
+      alpha: { from: 1, to: 0 },
+      duration: 1100,
+      ease: "Sine.easeOut",
+      onComplete: () => t.destroy(),
+    });
   }
 
   /**
@@ -1000,13 +1192,16 @@ export class MainScene extends Phaser.Scene {
     label: string,
     fill: number,
     onClick: () => void,
+    opts: { width?: number; height?: number; color?: string } = {},
   ): Phaser.GameObjects.Container {
-    const bw = 180;
-    const bh = 42;
+    const bw = opts.width ?? 180;
+    const bh = opts.height ?? 42;
     const bg = this.add
       .rectangle(0, 0, bw, bh, fill)
       .setStrokeStyle(2, 0x3d4663);
-    const lbl = this.txt(0, 0, label, 15, "#e6edf3").setOrigin(0.5);
+    const lbl = this.txt(0, 0, label, 15, opts.color ?? "#e6edf3").setOrigin(
+      0.5,
+    );
     const ctr = this.add.container(x, y, [bg, lbl]);
     ctr.setSize(bw, bh);
     ctr.setInteractive(
@@ -1977,6 +2172,10 @@ export class MainScene extends Phaser.Scene {
     this.goScoreText.setText(
       `Score: ${this.score}  \u2014 ${reason}${bestLine}`,
     );
+    // Sync the Web3 widgets with the current wallet state before the
+    // overlay fades in (handles the "already connected from previous
+    // run" case where we can skip straight to the submit button).
+    this.refreshWeb3UI();
     this.goLayer.setVisible(true).setAlpha(0);
     this.tweens.add({ targets: this.goLayer, alpha: 1, duration: 600 });
   }
