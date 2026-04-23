@@ -131,8 +131,8 @@ When an action lands in the 4-slot programme, the slot's border snaps to pure wh
 Clone, install, and run the dev server:
 
 ```bash
-git clone https://github.com/HERO-Yuki/Game_GitHubJam2026_idea01.git
-cd Game_GitHubJam2026_idea01
+git clone https://github.com/HERO-Yuki/Game_Pacific-Rhythm.git
+cd Game_Pacific-Rhythm
 npm install
 npm run dev
 ```
