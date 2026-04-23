@@ -28,8 +28,8 @@ import { notifyWavedashLoadComplete } from "../utils/wavedash";
 //  Constants
 // =====================================================================
 
-/** 60 BPM = 1 beat per second — matches MainScene RHYTHM_MS */
-const BEAT_MS = 1000;
+/** Base 60 BPM — matches normal / wave-1 endless tempo in `difficulty.ts`. */
+const BEAT_MS = DIFFICULTY_CONFIGS.normal.beatMs;
 
 const FONT_DELA = '"Dela Gothic One", Impact, "Arial Black", sans-serif';
 const FONT_MONO = "'Courier New', Courier, monospace";

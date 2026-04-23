@@ -54,9 +54,9 @@ export const KAIJU_STATS: Readonly<Record<KaijuRank, KaijuRankStats>> = {
 
 /**
  * Wave cadence for rank rotation.
- *  - Every `BOSS_EVERY` waves → boss  (3, 6, 12, 15, 21, 24, …)
- *  - Every `GIGA_EVERY` waves → giga  (9, 18, 27, …) — overrides boss
- *  - All other waves           → zako
+ *  - Every `GIGA_EVERY` waves → giga (9, 18, 27, …) — wins over boss
+ *  - Else every `BOSS_EVERY` waves → boss (3, 6, 12, 15, …)
+ *  - Else → zako
  *
  * `GIGA_EVERY` should stay a multiple of `BOSS_EVERY` so the rhythm
  * of "two zako, one boss, repeat, then a giga" reads cleanly.

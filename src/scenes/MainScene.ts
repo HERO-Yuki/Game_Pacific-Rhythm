@@ -5,14 +5,10 @@ import {
   DIFFICULTY_CONFIGS,
   isEndless,
   maxWavesForDifficulty,
+  phaseIndexForWave,
   type Difficulty,
 } from "../config/difficulty";
-import {
-  BOSS_EVERY,
-  KAIJU_STATS,
-  pickKaijuRank,
-  type KaijuRank,
-} from "../config/enemies";
+import { KAIJU_STATS, pickKaijuRank, type KaijuRank } from "../config/enemies";
 import {
   adjustAttackDmg,
   adjustCoolDelta,
@@ -44,8 +40,8 @@ export interface MainSceneInitData {
  *  centred on each beat.
  *
  *  Flow:
- *    Rhythm     (8 beats @ 60 BPM — kaiju reveal × 4 + player program × 4)
- *    Resolution (8 beats @ 120 BPM — kaiju telegraph + player resolve, × 4 steps)
+ *    Rhythm     (8 beats — kaiju reveal × 4 + player program × 4, spacing = rhythmMs)
+ *    Resolution (8 ticks — same spacing as resolveMs, equals rhythmMs here: telegraph + resolve × 4)
  *    → loop back to Rhythm (or GAME_OVER)
  *
  *  All visuals use Phaser shapes and text (no image assets).
@@ -545,10 +541,20 @@ export class MainScene extends Phaser.Scene {
     this.difficulty =
       requested && requested in DIFFICULTY_CONFIGS ? requested : "normal";
     this.maxWave = maxWavesForDifficulty(this.difficulty);
-    // Derive tempo from the difficulty config so EASY can run at a
-    // slower BPM without any per-difficulty branch in gameplay code.
+    this.syncBeatDuration(1);
+  }
+
+  /**
+   * Sets `rhythmMs` and `resolveMs`. ENDLESS derives beat length from
+   * `beatMsForEndlessWave`; other modes use static `beatMs` from config.
+   *
+   * @param endlessWave — Pass `1` from `init()` only: `this.wave` is not
+   *   reset until `create()` → `resetState()`.
+   */
+  private syncBeatDuration(endlessWave?: number): void {
     if (isEndless(this.difficulty)) {
-      this.rhythmMs = beatMsForEndlessWave(1);
+      const w = endlessWave ?? (this.wave < 1 ? 1 : this.wave);
+      this.rhythmMs = beatMsForEndlessWave(w);
     } else {
       this.rhythmMs = DIFFICULTY_CONFIGS[this.difficulty].beatMs;
     }
@@ -1831,10 +1837,7 @@ export class MainScene extends Phaser.Scene {
 
   private beginWave(): void {
     this.wave += 1;
-    if (isEndless(this.difficulty)) {
-      this.rhythmMs = beatMsForEndlessWave(this.wave);
-      this.resolveMs = this.rhythmMs;
-    }
+    this.syncBeatDuration();
     if (this.wave === 1) {
       // Anchor the run clock on the very first wave of the encounter.
       // `resetState()` already zeroes this, but reading `time.now` here
@@ -1992,7 +1995,7 @@ export class MainScene extends Phaser.Scene {
    * programming their response, and unpredictable between encounters.
    */
   private rollWeatherForWave(): void {
-    const phaseIdx = Math.floor((this.wave - 1) / BOSS_EVERY);
+    const phaseIdx = phaseIndexForWave(this.wave);
     if (phaseIdx !== this.currentPhaseIndex) {
       this.currentPhaseIndex = phaseIdx;
       // EASY disables weather entirely so new players can focus on

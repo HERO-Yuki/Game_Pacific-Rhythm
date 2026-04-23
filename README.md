@@ -22,7 +22,7 @@ Pacific Rhythm is a **rhythm-driven mech-vs-kaiju** duel. Every encounter is a f
 Built with **Phaser 3 shapes and text**, a pair of bespoke Midjourney flat-vector illustrations, and a fully **procedural audio engine** on the Web Audio API (no sample files ship with the build).
 
 - **Rhythm-based combat** — all input is beat-gated with a ±200 ms window
-- **Three difficulty tiers** — EASY (5 phases, no weather), NORMAL (7 phases, weather on), ENDLESS (unlimited, best-score chase)
+- **Three difficulty tiers** — EASY (5 phases, no weather), NORMAL (7 phases, weather on), ENDLESS (unlimited, best-score chase, **tempo ramps +2 BPM per phase** after phase 0)
 - **Procedural audio** — every SFX, beat, and hiss is synthesised at runtime from oscillators + a shared noise buffer
 - **Fully responsive** — `Phaser.Scale.FIT` on a 960×540 canvas; runs identically on desktop, mobile, YouTube Playables, and Wavedash iframes
 - **Keyboard + touch parity** — WASD / arrow keys are first-class, button hit-zones are thumb-friendly
@@ -36,7 +36,7 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 ### Build it with Phaser
 
 - **Phaser 3.88 + TypeScript (strict) + Vite 6** — scenes flow `BootScene` → `PreloaderScene` → `TitleScene` → `MainScene`.
-- **Shapes and text over sprites** for every UI element: HP bars, action buttons, sequencer slots, hit-sparks, and praise pops are all `Phaser.GameObjects.Rectangle` / `Text` / tween compositions. The only bitmap assets on the classpath are the four Midjourney mech/kaiju portraits — everything else is pure Phaser primitives.
+- **Shapes and text over sprites** for most UI: HP bars, action buttons, sequencer slots, hit-sparks, and praise pops are `Phaser.GameObjects.Rectangle` / `Text` / tween compositions. `TitleScene` also uses the loaded mech portrait as a dim background silhouette. The Midjourney mech/kaiju portraits are the main bitmap art; the rest is Phaser primitives.
 - **Seamless Web Audio integration** — `src/audio/AudioManager.ts` wraps `AudioContext`, `OscillatorNode`, `GainNode`, `StereoPannerNode`, and a cached noise `AudioBuffer` behind a singleton. Phaser drives the gameplay, the AudioManager is unlocked on the first pointer / key event (autoplay-policy-safe), and kaiju / mech sounds pan to −0.5 / +0.5 to reinforce the duel framing.
 - **Frame-rate-independent rhythm** — `update()` derives the current beat from `(now - startTime) / beatLength` rather than using a fixed-step tween, so the loop feels identical at 30 fps or 144 fps.
 
@@ -70,14 +70,14 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 
 ## How to play
 
-1. **Pick a difficulty** on the title screen — EASY, NORMAL, or ENDLESS. The selection drives run length, whether the weather system is active, and which best-record field the end-of-run celebration writes to.
-2. **Reading phase** (beats 1–4): The kaiju's 4-action attack sequence is revealed one slot per beat at BPM 60.
+1. **Pick a difficulty** on the title screen — EASY, NORMAL, or ENDLESS (arrow keys / A–D move the selection; **ENGAGE** starts the run). The selection drives run length, whether the weather system is active, and which best-record field the end-of-run celebration writes to.
+2. **Reading phase** (beats 1–4): The kaiju's 4-action attack sequence is revealed one slot per beat. EASY and NORMAL stay at **60 BPM** (1000 ms per beat). **ENDLESS** starts at 60 BPM and **adds +2 BPM each weather phase** (each block of `BOSS_EVERY` waves — see `phaseIndexForWave` in [`src/config/difficulty.ts`](src/config/difficulty.ts)); effective BPM is capped by `ENDLESS_BPM_MAX`.
 3. **Programming phase** (beats 5–8): Press an action button in sync with each beat to program your mech's counter-sequence.
    - **ATTACK** — deals damage; countered by GUARD
    - **GUARD** — blocks the kaiju's ATTACK; no effect otherwise
    - **COOL** — reduces Heat by 40; vulnerable to ATTACK (double damage)
    - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
-4. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
+4. **Resolution**: Eight ticks per turn at `resolveMs` (in this build **equal to** `rhythmMs`, so the same wall-clock beat length as the rhythm phase). Even ticks: kaiju _telegraph_; odd ticks: your action resolves. Four steps × two ticks = eight ticks, call-and-response.
 5. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
 6. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. EASY ends at wave 15, NORMAL at wave 21, ENDLESS never ends.
 7. **Weather** (NORMAL / ENDLESS only): Every 3-wave phase (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK −25 % / COOL +50 %), `SAND` (one kaiju slot masked as `[ ??? ]`), or `DROUGHT` (Heat gain +50 %). EASY disables the system entirely so learners only have to read the rhythm.
@@ -90,7 +90,9 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 | **NORMAL**  | 7         | 21        | enabled                 | Fastest clear time |
 | **ENDLESS** | unlimited | unlimited | enabled                 | Highest waves / bosses / gigas |
 
-Records live under `localStorage` (`pacificRhythm:bestRecords:v1`) and are shown underneath each button on the title screen (`BEST: —` until you clear a run). Each field is tracked independently for ENDLESS, so a long run with fewer bosses defeated doesn't overwrite a shorter run that bagged more bosses. EASY / NORMAL record the fastest completion time.
+ENDLESS **runaway tempo**: at the start of each wave, `MainScene` sets `rhythmMs` / `resolveMs` via `beatMsForEndlessWave(wave)` so reading, programming, and resolution all track the same accelerating clock. Phase boundaries match weather (`phaseIndexForWave`).
+
+Records live under `localStorage` (`pacificRhythm:bestRecords:v1`) and are summarized on the title screen after a run. Each field is tracked independently for ENDLESS, so a long run with fewer bosses defeated does not overwrite a shorter run that bagged more bosses. EASY / NORMAL record the fastest completion time.
 
 ### Input timing
 
@@ -172,9 +174,19 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER
 
 `GAME_CLEAR` fires only when the wave counter reaches the difficulty's cap (EASY 15 / NORMAL 21); ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
 
+### ENDLESS tempo
+
+- **Single source of truth** — `beatMsForEndlessWave(wave)` in [`src/config/difficulty.ts`](src/config/difficulty.ts) maps a 1-based wave to beat length. BPM = `min(ENDLESS_BPM_BASE + ENDLESS_BPM_RISE_PER_PHASE * phaseIndexForWave(wave), ENDLESS_BPM_MAX)`; `rhythmMs` is `round(60000 / BPM)`.
+- **When it updates** — `init()` calls `syncBeatDuration(1)` (wave is still stale before `resetState()`), then every `beginWave()` calls `syncBeatDuration()` so each encounter uses the pace for the current wave.
+- **Same “phase” as weather** — `phaseIndexForWave` is shared with `rollWeatherForWave`, so a new weather roll and a BPM step happen on the same wave boundaries.
+
+### Title screen (`TitleScene.ts`)
+
+- **Mech OS boot** — full-screen background, dim `mech-player` silhouette, terminal boot log, staggered difficulty pills, then **[ ENGAGE ]** with a 60 BPM timer pulse (uses `DIFFICULTY_CONFIGS.normal.beatMs` so the menu matches the default combat tempo). **[ENGAGE]** / Space / Enter runs a short VFX (shake, flash) and hands off to `MainScene`.
+
 ### Rhythm timing
 
-- Beat-count based: `update()` derives the current beat from `(now - startTime) / beatLength`, independent of frame rate
+- Beat-count based: `update()` derives the current beat from `(now - startTime) / beatLength`, independent of frame rate; `beatLength` is `rhythmMs` (and resolution uses `resolveMs`, kept equal to `rhythmMs` in the current build).
 - One-beat lead-in before the first beat fires
 - Buttons are enabled ±200 ms before the first player beat (early input support)
 
@@ -185,8 +197,8 @@ Waves cycle between three ranks. All the tunables live in [`src/config/enemies.t
 | Rank | Frequency | Texture | HP | Scale |
 | --- | --- | --- | --- | --- |
 | `zako` | Default | `kaiju-zako` | 100 | 1.0× |
-| `boss` | Every `BOSS_EVERY = 3` waves (3, 6, 12, 15…) | `kaiju-boss` | 180 | 1.18× |
-| `giga` | Every `GIGA_EVERY = 9` waves (9, 18, 27…) — overrides boss | `kaiju-giga` | 280 | 1.38× |
+| `boss` | Every 3rd wave **except** 9, 18, 27… (giga takes those) | `kaiju-boss` | 180 | 1.18× |
+| `giga` | Every 9th wave (9, 18, 27…) | `kaiju-giga` | 280 | 1.38× |
 
 `pickKaijuRank(wave)` (pure, tested by inspection) maps a 1-based wave index to a rank using giga > boss > zako priority. `MainScene.applyKaijuRank()` then swaps the body's texture, display size, HP budget, and name label in one place.
 
@@ -285,12 +297,12 @@ src/
   scenes/
     BootScene.ts         # Scale refresh → Preloader
     PreloaderScene.ts    # Loads images (mech sprite, kaiju ranks) → Title
-    TitleScene.ts        # Difficulty picker + best-record preview → MainScene
+    TitleScene.ts        # Mech-OS title, boot log, difficulty pills, ENGAGE → MainScene
     MainScene.ts         # Core game: rhythm sequencer, combat, VFX, game feel
   audio/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   config/
-    difficulty.ts        # Difficulty configs (phases / weather gate) + helpers
+    difficulty.ts        # Difficulty configs, `phaseIndexForWave`, ENDLESS `beatMsForEndlessWave`
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
   web3/

@@ -67,7 +67,7 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
       phases: Infinity,
       hasWeather: true,
       tagline: "no end · weather on · chase the best score",
-      // 起動直後（wave1・phase0）の基準; 以降は `beatMsForEndlessWave` で上書き
+      // Wave 1 / phase 0 base; in-run values come from `beatMsForEndlessWave`.
       beatMs: 1000, // 60 BPM
     },
   } as const;
@@ -95,27 +95,37 @@ export function isEndless(diff: Difficulty): boolean {
   return DIFFICULTY_CONFIGS[diff].phases === Infinity;
 }
 
-/** エンドレス開始 BPM（`beatMs` 1000 ms と同じ 60）。 */
+/**
+ * Weather and ENDLESS tempo share the same "phase" index: one block of
+ * `BOSS_EVERY` consecutive waves. For `wave < 1`, returns 0.
+ */
+export function phaseIndexForWave(wave: number): number {
+  if (wave < 1) return 0;
+  return Math.max(0, Math.floor((wave - 1) / BOSS_EVERY));
+}
+
+/** Endless start BPM (same as 1000 ms per beat = 60 BPM). */
 export const ENDLESS_BPM_BASE = 60;
 
-/** フェーズ（`BOSS_EVERY` 波ブロック）ごとに上げる BPM 幅。 */
+/** BPM added per phase index in ENDLESS (see `phaseIndexForWave`). */
 export const ENDLESS_BPM_RISE_PER_PHASE = 2;
 
 /**
- * 極端に速くなりすぎるのを防ぐ上限。ゲーム性に合わせて調整可。
- * `phaseIndex` が大きいほど `ENDLESS_BPM_MAX` に張り付く。
+ * High BPM cap so runs do not become unplayable. Large phase indices
+ * clamp to this BPM.
  */
 export const ENDLESS_BPM_MAX = 200;
 
 /**
- * エンドレス専用: 1-based `wave` に対応する 1 拍の長さ (ms)。
- * フェーズ番号は `Math.floor((wave - 1) / BOSS_EVERY)`（天候と同じ区切り）。
+ * ENDLESS only: millisecond length of one beat for a 1-based wave index.
+ * Tempo uses the same phase boundaries as `rollWeatherForWave` /
+ * `phaseIndexForWave`.
  */
 export function beatMsForEndlessWave(wave: number): number {
   if (wave < 1) {
     return DIFFICULTY_CONFIGS.endless.beatMs;
   }
-  const phaseIdx = Math.max(0, Math.floor((wave - 1) / BOSS_EVERY));
+  const phaseIdx = phaseIndexForWave(wave);
   const bpm = Math.min(
     ENDLESS_BPM_BASE + ENDLESS_BPM_RISE_PER_PHASE * phaseIdx,
     ENDLESS_BPM_MAX,
