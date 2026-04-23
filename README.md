@@ -4,7 +4,7 @@
 
 Pilot a giant combat **mech** and take down the **KAIJU (怪獣)** menace one beat at a time. Read the kaiju's incoming attack program, then counter-program your mech's response in time with the beat. Miss the rhythm and your slot defaults to IDLE — leaving you wide open.
 
-Built with **Phaser 3 shapes and text** (with the mech sprite as the first bespoke illustration; the rest is still procedural primitives) and a fully **procedural audio engine** built on the Web Audio API (no sample files).
+Built with **Phaser 3 shapes and text** plus a pair of bespoke Midjourney flat-vector illustrations (player mech, zako kaiju) and a fully **procedural audio engine** built on the Web Audio API (no sample files).
 
 ## How to play
 
@@ -74,6 +74,7 @@ public/
   assets/
     images/
       mech-player.png    # Player mech — Midjourney (flat vector style)
+      kaiju-zako.png     # Zako kaiju — Midjourney (flat vector style)
     audio/               # Reserved for future sample banks
     fonts/               # Reserved for webfont fallbacks
 ```
@@ -112,7 +113,7 @@ Rock-paper-scissors style resolution with Heat management. Each step is split ov
 - **Camera shake**: Intensity and duration scale with damage (light for blocks, heavy for SPECIAL)
 - **Hit sparks**: Particle burst of coloured rectangles at point of impact
 - **Beat bounce**: Characters, labels, and buttons pulse scale 1.0 → 1.05 → 1.0 every beat
-- **Body flash**: The mech sprite flashes via `setTint`, the kaiju rectangle via `setFillStyle` — both restored after 120 ms from a single `flash()` helper
+- **Body flash**: Both combatant sprites flash via `setTint` and snap back after 120 ms from a single `flash()` helper
 
 ### Audio (Phase 2)
 

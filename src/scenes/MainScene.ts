@@ -112,7 +112,6 @@ const HEAT_DELTA = {
 
 const PAL = {
   bg: 0x0b0f14,
-  kaiju: 0xcc3333,
   slotBg: 0x1a1f2e,
   slotStroke: 0x3d4663,
   highlight: 0xffcc00,
@@ -234,12 +233,13 @@ export class MainScene extends Phaser.Scene {
   private heatAlertTween?: Phaser.Tweens.Tween;
 
   /* ---------- UI refs ---------- */
-  private kaijuRect!: Phaser.GameObjects.Rectangle;
   /**
-   * Player mech body — textured Image rather than a flat Rectangle so
-   * we can use the Midjourney illustration. All VFX helpers accept
-   * both Rectangle and Image so the kaiju side keeps working for now.
+   * Combatant bodies — both sides are now textured Images backed by
+   * Midjourney flat-vector illustrations, so every VFX helper that
+   * touches them works in terms of setTint / Transform and never
+   * needs to know about fills.
    */
+  private kaijuBody!: Phaser.GameObjects.Image;
   private playerBody!: Phaser.GameObjects.Image;
   private kaijuHPText!: Phaser.GameObjects.Text;
   private playerHPText!: Phaser.GameObjects.Text;
@@ -386,7 +386,9 @@ export class MainScene extends Phaser.Scene {
     const barGap = 14;
 
     const kx = W * 0.25;
-    this.kaijuRect = this.add.rectangle(kx, cy, sz, sz, PAL.kaiju);
+    this.kaijuBody = this.add
+      .image(kx, cy, "kaiju-zako")
+      .setDisplaySize(sz, sz);
     this.add
       .rectangle(kx, cy - sz / 2 - barGap, this.barMaxW, barH, 0x222222)
       .setOrigin(0.5);
@@ -621,7 +623,7 @@ export class MainScene extends Phaser.Scene {
   /** Builds the cached array of objects that bounce on every beat. */
   private cacheBounceTargets(): void {
     this.bounceTargets = [
-      this.kaijuRect,
+      this.kaijuBody,
       this.playerBody,
       this.phaseLabel,
       this.scoreLabel,
@@ -685,7 +687,7 @@ export class MainScene extends Phaser.Scene {
 
   private beginWave(): void {
     this.kaijuHP = HP_INIT.kaiju;
-    this.kaijuRect.setAlpha(1).setScale(1);
+    this.kaijuBody.setAlpha(1).setScale(1);
     this.refreshHUD();
     this.startRhythmSequence();
   }
@@ -976,7 +978,7 @@ export class MainScene extends Phaser.Scene {
    */
   private telegraphKaiju(i: number): void {
     const kAct = this.kaijuSeq[i];
-    const kR = this.kaijuRect;
+    const kR = this.kaijuBody;
 
     switch (kAct) {
       case ActionType.ATTACK:
@@ -1086,7 +1088,7 @@ export class MainScene extends Phaser.Scene {
     step: number,
   ): void {
     let msg: string;
-    const kR = this.kaijuRect;
+    const kR = this.kaijuBody;
     const pR = this.playerBody;
 
     switch (pAct) {
@@ -1208,7 +1210,7 @@ export class MainScene extends Phaser.Scene {
     console.log(`[Wave] Defeated! Score: ${this.score}`);
 
     this.tweens.add({
-      targets: this.kaijuRect,
+      targets: this.kaijuBody,
       alpha: 0,
       duration: 80,
       yoyo: true,
@@ -1439,26 +1441,16 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
-   * Short color pulse on a combatant body. Rectangles swap their fill
-   * (currently only the kaiju side), Image sprites multiply a tint on
-   * top of their texture; both paths restore after a fixed 120 ms so
-   * we never leak a "stuck" color.
+   * Short color pulse on a combatant body. Tint-multiplies the sprite
+   * for 120 ms then clears it, so we never leak a "stuck" color.
    */
-  private flash(
-    target: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image,
-    color: number,
-  ): void {
-    if (target instanceof Phaser.GameObjects.Image) {
-      target.setTint(color);
-      this.time.delayedCall(120, () => target.clearTint());
-      return;
-    }
-    target.setFillStyle(color);
-    this.time.delayedCall(120, () => target.setFillStyle(PAL.kaiju));
+  private flash(target: Phaser.GameObjects.Image, color: number): void {
+    target.setTint(color);
+    this.time.delayedCall(120, () => target.clearTint());
   }
 
   private popText(
-    target: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Image,
+    target: Phaser.GameObjects.Image,
     text: string,
     color: string,
   ): void {

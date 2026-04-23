@@ -13,12 +13,13 @@ export class PreloaderScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // Player mech — flat-vector illustration sourced from Midjourney.
-    // See docs/midjourney-mech-prompts.md (gitignored) for the exact prompt
-    // and regeneration notes.
+    // Combatant sprites — flat-vector illustrations sourced from Midjourney.
+    // See docs/midjourney-{mech,kaiju}-prompts.md (gitignored) for the exact
+    // prompts and regeneration notes.
     this.load.image("mech-player", "assets/images/mech-player.png");
+    this.load.image("kaiju-zako", "assets/images/kaiju-zako.png");
 
-    // Future: JSON levels, audio banks, kaiju sprite sheets, etc.
+    // Future: JSON levels, audio banks, boss / giga kaiju variants, etc.
   }
 
   create(): void {
