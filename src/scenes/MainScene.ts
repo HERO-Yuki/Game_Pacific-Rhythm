@@ -40,6 +40,15 @@ const INPUT_WINDOW_MS = 200;
 const SEQ_LEN = 4;
 const TOTAL_BEATS = SEQ_LEN * 2;
 
+/**
+ * Resolution plays each step across two beats: an even "telegraph"
+ * beat where the kaiju shows its intent, then an odd "resolve" beat
+ * where the player's response lands. Eight ticks total per turn so
+ * the encounter reads as call-and-response.
+ */
+const RESOLVE_BEATS_PER_STEP = 2;
+const RESOLVE_TOTAL_TICKS = SEQ_LEN * RESOLVE_BEATS_PER_STEP;
+
 const HP_INIT = { player: 100, kaiju: 100 } as const;
 const OVERHEAT_THRESHOLD = 100;
 const OVERHEAT_STREAK_LIMIT = 3;
@@ -901,25 +910,100 @@ export class MainScene extends Phaser.Scene {
       this.playerSeq.join(" "),
     );
 
-    // Reset the per-turn alarm latch; resolveStep() will arm it the
-    // moment an overheat is actually enforced.
+    // Reset the per-turn alarm latch; resolvePlayerStep() will arm it
+    // the moment an overheat is actually enforced.
     this.ohAlarmedThisTurn = false;
 
-    let step = 0;
+    let tick = 0;
     this.time.addEvent({
       delay: RESOLVE_MS,
-      repeat: SEQ_LEN - 1,
+      repeat: RESOLVE_TOTAL_TICKS - 1,
       callback: () => {
         if (this.phase !== GamePhase.RESOLUTION) return;
-        this.resolveStep(step);
-        step++;
+        this.resolveTick(tick);
+        tick++;
       },
     });
   }
 
-  private resolveStep(i: number): void {
-    this.highlightStep(i);
+  /**
+   * One resolution beat. Even ticks (0, 2, 4, 6) run the kaiju's
+   * telegraph — its action plays from the left channel and a windup
+   * animation fires. Odd ticks (1, 3, 5, 7) are the resolve step
+   * where the player's response actually lands damage.
+   */
+  private resolveTick(tick: number): void {
+    const stepIdx = tick >> 1;
+    const isTelegraph = (tick & 1) === 0;
 
+    this.pulseBeat();
+
+    if (isTelegraph) {
+      this.highlightStep(stepIdx, "kaiju");
+      this.telegraphKaiju(stepIdx);
+    } else {
+      this.highlightStep(stepIdx, "player");
+      this.resolvePlayerStep(stepIdx);
+    }
+  }
+
+  /**
+   * Kaiju "windup" played on the telegraph beat of each resolve step.
+   * Only the kaiju makes noise here — the player's response lives in
+   * resolvePlayerStep so the encounter reads as call-and-response.
+   */
+  private telegraphKaiju(i: number): void {
+    const kAct = this.kaijuSeq[i];
+    const kR = this.kaijuRect;
+
+    switch (kAct) {
+      case ActionType.ATTACK:
+        audio.playAttack({ pan: PAN_KAIJU });
+        // Lean toward the player (x+) to telegraph the incoming hit.
+        this.tweens.add({
+          targets: kR,
+          x: { from: kR.x, to: kR.x + 24 },
+          duration: 140,
+          yoyo: true,
+          ease: "Back.easeOut",
+        });
+        this.flash(kR, VFX.flash.kaijuHit);
+        break;
+
+      case ActionType.GUARD:
+        audio.playGuard({ pan: PAN_KAIJU });
+        // Angle wobble keeps clear of pulseBeat's scale tween.
+        this.tweens.add({
+          targets: kR,
+          angle: { from: 0, to: -8 },
+          duration: 120,
+          yoyo: true,
+          ease: "Sine.easeOut",
+        });
+        this.flash(kR, VFX.flash.kaijuBlock);
+        break;
+
+      case ActionType.SPECIAL:
+        // Kaiju charges up before unleashing — bosses only (Phase 6).
+        audio.playSpecial({ pan: PAN_KAIJU });
+        this.emitSparks(kR.x, kR.y, VFX.spark.special);
+        this.flash(kR, VFX.flash.kaijuSpecial);
+        this.popText(kR, "!!", VFX.pop.special);
+        break;
+
+      case ActionType.IDLE:
+      case ActionType.COOL:
+        // No windup for non-actions.
+        break;
+    }
+  }
+
+  /**
+   * Resolve the player's programmed response against the kaiju action
+   * that was telegraphed a beat earlier. Also runs overheat bookkeeping
+   * and the end-of-phase hand-off to the next wave / game-over.
+   */
+  private resolvePlayerStep(i: number): void {
     let pAct = this.playerSeq[i];
     const kAct = this.kaijuSeq[i];
 
@@ -966,6 +1050,13 @@ export class MainScene extends Phaser.Scene {
   /*  Combat                                                        */
   /* ============================================================ */
 
+  /**
+   * Apply damage, Heat, VFX, and player-side / reaction audio for one
+   * resolve step. The kaiju's own action sound (a swing, a guard, a
+   * SPECIAL charge) has already played during telegraphKaiju one beat
+   * earlier, so this method only emits post-impact sounds (damage,
+   * player action, guards that are reactions to the player's attack).
+   */
   private executeCombat(
     pAct: ActionType,
     kAct: ActionType,
@@ -989,7 +1080,6 @@ export class MainScene extends Phaser.Scene {
           this.flash(kR, VFX.flash.kaijuHit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(120, 200);
-          audio.playAttack({ pan: PAN_KAIJU });
           audio.playDamage({ pan: PAN_KAIJU, volume: 0.8 });
           audio.playDamage({ pan: PAN_PLAYER, volume: 0.8 });
           this.applyHitStop(HITSTOP_MS.clash);
@@ -998,7 +1088,6 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(kR.x, kR.y, VFX.spark.block);
           this.flash(kR, VFX.flash.kaijuBlock);
           this.shake(30, 80);
-          audio.playGuard({ pan: PAN_KAIJU });
         } else {
           this.kaijuHP -= DMG.attack;
           msg = `HIT! KAIJU -${DMG.attack}`;
@@ -1016,7 +1105,6 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(pR.x, pR.y, VFX.spark.block);
           this.flash(pR, VFX.flash.playerGuard);
           this.shake(30, 80);
-          audio.playAttack({ pan: PAN_KAIJU });
           audio.playGuard({ pan: PAN_PLAYER });
         } else {
           msg = "\u2014";
@@ -1033,7 +1121,6 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(pR.x, pR.y, VFX.spark.crit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(180, 250);
-          audio.playAttack({ pan: PAN_KAIJU });
           audio.playDamage({ pan: PAN_PLAYER });
           this.applyHitStop(HITSTOP_MS.vulnerable);
         } else {
@@ -1075,7 +1162,6 @@ export class MainScene extends Phaser.Scene {
           this.emitSparks(pR.x, pR.y, VFX.spark.hit);
           this.flash(pR, VFX.flash.playerHit);
           this.shake(60, 140);
-          audio.playAttack({ pan: PAN_KAIJU });
           audio.playDamage({ pan: PAN_PLAYER });
         } else {
           msg = "\u2014";
@@ -1205,16 +1291,27 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  private highlightStep(idx: number): void {
+  /**
+   * Spotlight a resolution step. Dim every non-active slot, and put a
+   * gold stroke on whichever side is acting this beat — the kaiju on
+   * its telegraph beat, the player on the resolve beat. The inactive
+   * side keeps its default stroke so the two columns stay legible.
+   */
+  private highlightStep(idx: number, active: "kaiju" | "player"): void {
     for (let i = 0; i < SEQ_LEN; i++) {
       const a = i === idx ? 1 : 0.3;
       this.kSlots[i].bg.setAlpha(a);
       this.kSlots[i].label.setAlpha(a);
       this.pSlots[i].bg.setAlpha(a);
       this.pSlots[i].label.setAlpha(a);
+      this.kSlots[i].border.setStrokeStyle(2, PAL.slotStroke);
+      this.pSlots[i].border.setStrokeStyle(2, PAL.slotStroke);
     }
-    this.kSlots[idx].border.setStrokeStyle(3, PAL.highlight);
-    this.pSlots[idx].border.setStrokeStyle(3, PAL.highlight);
+    if (active === "kaiju") {
+      this.kSlots[idx].border.setStrokeStyle(3, PAL.highlight);
+    } else {
+      this.pSlots[idx].border.setStrokeStyle(3, PAL.highlight);
+    }
   }
 
   private enableButtons(on: boolean): void {

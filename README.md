@@ -14,7 +14,7 @@ Built entirely with **Phaser 3 shapes and text** (no image assets) and a fully *
    - **GUARD** — blocks the kaiju's ATTACK; no effect otherwise
    - **COOL** — reduces Heat by 40; vulnerable to ATTACK (double damage)
    - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
-3. **Resolution**: Actions are resolved step-by-step at BPM 120 with hit sparks, damage popups, and camera shake.
+3. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
 4. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
 5. **Waves**: Defeat the kaiju to advance. How many waves of kaiju can your pilot survive?
 
@@ -90,7 +90,10 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
 
 ### Combat system
 
-Rock-paper-scissors style resolution with Heat management:
+Rock-paper-scissors style resolution with Heat management. Each step is split over two beats so the kaiju "telegraphs" first and the player's response lands on the following beat:
+
+- **Telegraph beat** — the kaiju leans in / flashes / charges up, its action sound plays from the left channel (`PAN_KAIJU`). No damage yet.
+- **Resolve beat** — the player's programmed response executes against the telegraphed move. Damage, guard deflects, SPECIAL breaks, and hit-stop all fire here.
 
 | Mech (Player) | vs Kaiju ATTACK | vs Kaiju GUARD | vs Kaiju IDLE / COOL |
 | --- | --- | --- | --- |
