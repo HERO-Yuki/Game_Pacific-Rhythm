@@ -66,6 +66,8 @@ src/
     MainScene.ts         # Core game: rhythm sequencer, combat, VFX, game feel
   audio/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
+  config/
+    enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
   web3/                  # Ethereum integration stubs
   utils/
     safeArea.ts          # FIT-mode scale config + safe-area inset probe
@@ -97,7 +99,7 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
 
 ### Kaiju ranks
 
-Waves cycle between three ranks driven by the `KAIJU_STATS` config in `MainScene.ts` and picked by `pickKaijuRank(wave)` (giga > boss > zako):
+Waves cycle between three ranks. All the tunables live in [`src/config/enemies.ts`](src/config/enemies.ts) so designers can tweak HP, scale, label colour, and cadence without touching `MainScene`:
 
 | Rank | Frequency | Texture | HP | Scale |
 | --- | --- | --- | --- | --- |
@@ -105,7 +107,7 @@ Waves cycle between three ranks driven by the `KAIJU_STATS` config in `MainScene
 | `boss` | Every `BOSS_EVERY = 3` waves (3, 6, 12, 15…) | `kaiju-boss` | 180 | 1.18× |
 | `giga` | Every `GIGA_EVERY = 9` waves (9, 18, 27…) — overrides boss | `kaiju-giga` | 280 | 1.38× |
 
-`applyKaijuRank()` swaps the body's texture, display size, and HP-bar denominator in one place, so tuning difficulty or adding a new rank only touches this config.
+`pickKaijuRank(wave)` (pure, tested by inspection) maps a 1-based wave index to a rank using giga > boss > zako priority. `MainScene.applyKaijuRank()` then swaps the body's texture, display size, HP budget, and name label in one place.
 
 ### Combat system
 
