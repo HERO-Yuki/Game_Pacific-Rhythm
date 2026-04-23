@@ -1,6 +1,7 @@
 {
   "_comment": "Mirror for CI/docs. The Wavedash CLI reads wavedash.toml — keep game_id and paths in sync.",
-  "game_id": "your-game-id",
+  "project_id": "pacific-rhythm",
+  "game_id": "pacific-rhythm",
   "upload_dir": "./dist",
   "engine": "custom",
   "custom": {

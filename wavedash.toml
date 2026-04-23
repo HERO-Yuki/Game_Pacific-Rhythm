@@ -1,6 +1,8 @@
 # Official Wavedash CLI config: https://docs.wavedash.com/cli/configuration
-# Replace game_id with the id from your Wavedash developer dashboard.
-game_id = "your-game-id"
+[project]
+name    = "Pacific Rhythm"
+game_id = "pacific-rhythm"
+
 upload_dir = "./dist"
 
 [custom]
