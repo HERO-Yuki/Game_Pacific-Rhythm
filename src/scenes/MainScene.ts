@@ -7,6 +7,9 @@ import {
   type KaijuRank,
 } from "../config/enemies";
 import {
+  adjustAttackDmg,
+  adjustCoolDelta,
+  adjustHeatGain,
   pickWeather,
   WEATHER_EFFECTS,
   type Weather,
@@ -930,25 +933,21 @@ export class MainScene extends Phaser.Scene {
   }
 
   /* ---- Combat modifier helpers ---- */
+  /*                                                                 */
+  /* Thin wrappers around the pure helpers in src/config/weather.ts. */
+  /* They read the current weather once so the call sites inside    */
+  /* executeCombat stay compact and free of repeated lookups.       */
 
-  /**
-   * Apply the weather's ATTACK damage multiplier and clamp to at least
-   * 1 HP so rounding never turns a landed hit into a no-op. SPECIAL
-   * damage stays pristine — it deliberately shrugs off weather.
-   */
   private weatherAdjAtkDmg(base: number): number {
-    const scaled = Math.round(base * this.weatherEffect().attackDmgMul);
-    return Math.max(1, scaled);
+    return adjustAttackDmg(base, this.weatherEffect());
   }
 
-  /** Scale COOL's negative heat delta. Input is negative; output too. */
   private weatherAdjCoolDelta(base: number): number {
-    return Math.round(base * this.weatherEffect().coolBonusMul);
+    return adjustCoolDelta(base, this.weatherEffect());
   }
 
-  /** Scale any positive Heat gain (ATTACK wind-up, SPECIAL charge). */
   private weatherAdjHeatGain(base: number): number {
-    return Math.round(base * this.weatherEffect().heatGainMul);
+    return adjustHeatGain(base, this.weatherEffect());
   }
 
   /**

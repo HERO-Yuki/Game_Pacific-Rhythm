@@ -1,15 +1,18 @@
 /**
  * Weather system configuration.
  *
- * Weather is a *phase-scoped* modifier: every `WAVES_PER_PHASE` waves
- * (which aligns with the boss cadence in `enemies.ts`) the game rolls
- * a new weather that stays locked for the duration of the phase.
- * This gives the player a consistent ruleset to plan against across
- * the two zako waves and their closing boss / giga fight.
+ * Weather is a *phase-scoped* modifier: every `BOSS_EVERY` waves
+ * (the same cadence that governs boss appearances in `enemies.ts`)
+ * the game rolls a new weather that stays locked for the duration
+ * of the phase. This gives the player a consistent ruleset to plan
+ * against across the two zako waves and the closing boss / giga
+ * fight.
  *
- * Mirrors the shape of `enemies.ts` — pure data + one picker function
- * — so `MainScene` only has to look up `WEATHER_EFFECTS[current]` and
- * multiply its combat constants.
+ * The module mirrors the shape of `enemies.ts` — pure data +
+ * pure functions only — so `MainScene` stays a thin consumer:
+ * pick a weather once per phase, then thread the multiplier
+ * helpers (`adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain`)
+ * through its combat constants.
  */
 
 export type Weather = "clear" | "snow" | "sand" | "drought";
@@ -110,4 +113,39 @@ export function pickWeather(
 ): Weather {
   if (phaseIndex <= 0) return "clear";
   return WEATHER_POOL[Math.floor(rng() * WEATHER_POOL.length)];
+}
+
+/* ----------------------------------------------------------------- */
+/* Pure combat-multiplier helpers                                    */
+/*                                                                   */
+/* These take raw combat constants (from MainScene's DMG / HEAT      */
+/* tables) and the active WeatherEffect, and return the post-weather */
+/* value. Keeping them here instead of on the Scene means balance    */
+/* tweaks and unit tests can exercise them without a Phaser runtime. */
+/* ----------------------------------------------------------------- */
+
+/**
+ * Apply the weather's ATTACK damage multiplier and clamp to at
+ * least 1 HP so rounding never silently turns a landed hit into a
+ * no-op. SPECIAL damage intentionally bypasses this helper — the
+ * big finisher should always feel impactful.
+ */
+export function adjustAttackDmg(base: number, eff: WeatherEffect): number {
+  return Math.max(1, Math.round(base * eff.attackDmgMul));
+}
+
+/**
+ * Scale COOL's Heat delta. The base value is negative (cooling the
+ * mech), and `coolBonusMul > 1` amplifies the cool-down.
+ */
+export function adjustCoolDelta(base: number, eff: WeatherEffect): number {
+  return Math.round(base * eff.coolBonusMul);
+}
+
+/**
+ * Scale any *positive* Heat gain (ATTACK wind-up, SPECIAL charge).
+ * Drought pushes the mech toward overheat faster.
+ */
+export function adjustHeatGain(base: number, eff: WeatherEffect): number {
+  return Math.round(base * eff.heatGainMul);
 }

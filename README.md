@@ -140,7 +140,7 @@ Weather is a *phase-scoped* modifier bundled in [`src/config/weather.ts`](src/co
 - **Heat gain** multiplies every positive Heat delta (ATTACK wind-up and SPECIAL charge).
 - **Sand mask** hides one random kaiju reveal slot as `?` during Reading; `telegraphKaiju()` unmasks it right before it resolves so the player still learns from the outcome.
 
-Three helper methods on `MainScene` — `weatherAdjAtkDmg`, `weatherAdjCoolDelta`, `weatherAdjHeatGain` — wrap the multiplications and clamp ATK damage to at least 1 so rounding never turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK -25% / COOL +50%` etc.).
+The multiplications themselves live in `src/config/weather.ts` as three pure functions — `adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain` — so balance tweaks and unit tests can exercise them without a Phaser runtime. `MainScene` keeps thin wrappers (`weatherAdjAtkDmg` et al.) that read `this.weatherEffect()` once so `executeCombat` call sites stay compact. ATK damage is clamped to at least 1 HP so rounding never silently turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK -25% / COOL +50%` etc.).
 
 ### Combat system
 
