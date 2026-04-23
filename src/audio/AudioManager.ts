@@ -34,12 +34,28 @@ type WebkitWindow = Window & {
  */
 const EPSILON = 0.0001;
 
+// Title BGM scheduling constants
+const BGM_BPM = 80;
+const BGM_BEAT = 60 / BGM_BPM; // 0.75 s per beat
+const BGM_PATTERN = 8;          // beats per loop
+const BGM_LOOKAHEAD = 0.2;      // seconds to schedule ahead
+const BGM_TICK_MS = 100;        // scheduler setInterval period (ms)
+
 export class AudioManager {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private masterVolume = 0.32;
   private enabled = true;
+
+  // ----- Title BGM state -----
+  private bgmGain: GainNode | null = null;
+  private bgmActive = false;
+  private bgmBeatIndex = 0;
+  private bgmPatternCount = 0;
+  private bgmNextBeatTime = 0;
+  private bgmTimer: ReturnType<typeof setInterval> | null = null;
+  private bgmDroneNodes: OscillatorNode[] = [];
 
   // ------------------------------------------------------------------
   //  Public API
@@ -330,6 +346,82 @@ export class AudioManager {
   }
 
   // ------------------------------------------------------------------
+  //  Title BGM — public API
+  // ------------------------------------------------------------------
+
+  /** Returns true when the AudioContext is live and running. */
+  public isContextRunning(): boolean {
+    return this.ctx !== null && this.ctx.state === "running";
+  }
+
+  /**
+   * Starts the title-screen ambient BGM — a sparse, tense procedural loop
+   * evoking a military operations-room briefing. The loop is scheduled with
+   * a look-ahead technique so timing stays tight regardless of setInterval
+   * jitter. Safe to call multiple times; repeated calls while active are
+   * no-ops.
+   */
+  public startTitleBgm(): void {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain || this.bgmActive) return;
+    this.bgmActive = true;
+
+    // Dedicated bus for the BGM layer — lets us fade it in/out independently
+    // of SFX without touching the master gain.
+    const bgmGain = ctx.createGain();
+    bgmGain.gain.setValueAtTime(0, ctx.currentTime);
+    bgmGain.gain.linearRampToValueAtTime(1, ctx.currentTime + 2.0);
+    bgmGain.connect(this.masterGain);
+    this.bgmGain = bgmGain;
+
+    this.bgmStartDrones(ctx, bgmGain);
+
+    this.bgmBeatIndex = 0;
+    this.bgmPatternCount = 0;
+    this.bgmNextBeatTime = ctx.currentTime + 0.1;
+    this.bgmTimer = setInterval(() => this.bgmScheduleAhead(), BGM_TICK_MS);
+  }
+
+  /** Fades out and stops the title-screen BGM. */
+  public stopTitleBgm(): void {
+    if (!this.bgmActive) return;
+    this.bgmActive = false;
+
+    if (this.bgmTimer !== null) {
+      clearInterval(this.bgmTimer);
+      this.bgmTimer = null;
+    }
+
+    const ctx = this.ctx;
+    const gain = this.bgmGain;
+    if (ctx && gain) {
+      const now = ctx.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.55);
+
+      // Stop drone oscillators after the fade completes.
+      const drones = this.bgmDroneNodes.splice(0);
+      setTimeout(() => {
+        drones.forEach((n) => {
+          try {
+            n.stop();
+          } catch (_) {
+            /* already stopped */
+          }
+        });
+        try {
+          gain.disconnect();
+        } catch (_) {
+          /* already disconnected */
+        }
+      }, 700);
+    }
+
+    this.bgmGain = null;
+  }
+
+  // ------------------------------------------------------------------
   //  Internals
   // ------------------------------------------------------------------
 
@@ -413,6 +505,208 @@ export class AudioManager {
       data[i] = Math.random() * 2 - 1;
     }
     return buffer;
+  }
+
+  // ------------------------------------------------------------------
+  //  Title BGM — internals
+  // ------------------------------------------------------------------
+
+  /**
+   * Continuous sub-bass drone: two slightly detuned D1 sines (beating
+   * warmth) plus an A1 fifth for low-mid richness. A slow LFO tremolo
+   * makes the drone breathe rather than sit static.
+   */
+  private bgmStartDrones(ctx: AudioContext, sink: GainNode): void {
+    for (const freq of [36.71, 36.85]) {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+
+      const droneGain = ctx.createGain();
+      droneGain.gain.value = 0.065;
+
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.18;
+      const lfoG = ctx.createGain();
+      lfoG.gain.value = 0.022;
+      lfo.connect(lfoG);
+      lfoG.connect(droneGain.gain);
+
+      osc.connect(droneGain).connect(sink);
+      osc.start();
+      lfo.start();
+      this.bgmDroneNodes.push(osc, lfo);
+    }
+
+    // A1 perfect fifth (55 Hz) — fills the low-mid register softly.
+    const fifth = ctx.createOscillator();
+    fifth.type = "sine";
+    fifth.frequency.value = 55.0;
+    const fifthGain = ctx.createGain();
+    fifthGain.gain.value = 0.04;
+    fifth.connect(fifthGain).connect(sink);
+    fifth.start();
+    this.bgmDroneNodes.push(fifth);
+  }
+
+  /** Look-ahead scheduler: called every BGM_TICK_MS by setInterval. */
+  private bgmScheduleAhead(): void {
+    if (!this.bgmActive || !this.ctx || !this.bgmGain) return;
+    const until = this.ctx.currentTime + BGM_LOOKAHEAD;
+    while (this.bgmNextBeatTime < until) {
+      this.bgmScheduleBeat(
+        this.ctx,
+        this.bgmGain,
+        this.bgmBeatIndex,
+        this.bgmNextBeatTime,
+      );
+      this.bgmNextBeatTime += BGM_BEAT;
+      this.bgmBeatIndex++;
+      if (this.bgmBeatIndex >= BGM_PATTERN) {
+        this.bgmBeatIndex = 0;
+        this.bgmPatternCount++;
+      }
+    }
+  }
+
+  /**
+   * Dispatches all sounds for a single beat position.
+   *
+   * Pattern at 80 BPM, D minor / Phrygian feel:
+   *   Beat 0 — strong kick + D4 melody note
+   *   Beat 2 — soft kick + F4
+   *   Beat 3 — G4 (ascending colour)
+   *   Beat 4 — medium kick
+   *   Beat 5 — A4 (fifth, slight tension)
+   *   Beat 6 — E♭4 (♭2 Phrygian step — unresolved tension)
+   *   Every other pattern, beat 0 — sonar radar ping
+   *   Every beat — barely-audible hi-hat tick (military-clock texture)
+   */
+  private bgmScheduleBeat(
+    ctx: AudioContext,
+    sink: GainNode,
+    beat: number,
+    t: number,
+  ): void {
+    // Bass kick
+    if (beat === 0) {
+      this.bgmKick(ctx, sink, t, 0.11);
+    } else if (beat === 4) {
+      this.bgmKick(ctx, sink, t, 0.08);
+    } else if (beat === 2) {
+      this.bgmKick(ctx, sink, t, 0.042);
+    }
+
+    // Sparse melodic stabs (triangle wave, soft)
+    // D4=293.7, Eb4=311.1, F4=349.2, G4=392.0, A4=440.0
+    type NoteSpec = { f: number; d: number; v: number };
+    const MELODY: Readonly<Partial<Record<number, NoteSpec>>> = {
+      0: { f: 293.66, d: 0.52, v: 0.09 },
+      2: { f: 349.23, d: 0.30, v: 0.07 },
+      3: { f: 392.0, d: 0.26, v: 0.06 },
+      5: { f: 440.0, d: 0.44, v: 0.08 },
+      6: { f: 311.13, d: 0.32, v: 0.065 },
+    };
+    const note = MELODY[beat];
+    if (note) this.bgmNote(ctx, sink, t, note.f, note.d, note.v);
+
+    // Sonar ping — fires on beat 0 of every other pattern iteration.
+    if (beat === 0 && this.bgmPatternCount % 2 === 1) {
+      this.bgmPing(ctx, sink, t);
+    }
+
+    // Military-clock tick on every beat
+    this.bgmTick(ctx, sink, t);
+  }
+
+  private bgmKick(
+    ctx: AudioContext,
+    sink: GainNode,
+    t: number,
+    vol: number,
+  ): void {
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(86, t);
+    osc.frequency.exponentialRampToValueAtTime(36, t + 0.22);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(EPSILON, t);
+    env.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+    env.gain.exponentialRampToValueAtTime(EPSILON, t + 0.34);
+
+    osc.connect(env).connect(sink);
+    osc.start(t);
+    osc.stop(t + 0.38);
+  }
+
+  private bgmNote(
+    ctx: AudioContext,
+    sink: GainNode,
+    t: number,
+    freq: number,
+    dur: number,
+    vol: number,
+  ): void {
+    const osc = ctx.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 2200;
+    lp.Q.value = 0.4;
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(EPSILON, t);
+    env.gain.exponentialRampToValueAtTime(vol, t + 0.018);
+    env.gain.exponentialRampToValueAtTime(EPSILON, t + dur);
+
+    osc.connect(lp).connect(env).connect(sink);
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
+  }
+
+  /** Sonar-style descending sine ping, panned slightly left. */
+  private bgmPing(ctx: AudioContext, sink: GainNode, t: number): void {
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(1760, t);
+    osc.frequency.exponentialRampToValueAtTime(1180, t + 1.6);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(EPSILON, t);
+    env.gain.exponentialRampToValueAtTime(0.052, t + 0.012);
+    env.gain.exponentialRampToValueAtTime(EPSILON, t + 1.8);
+
+    if (typeof ctx.createStereoPanner === "function") {
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = -0.4;
+      osc.connect(env).connect(pan).connect(sink);
+    } else {
+      osc.connect(env).connect(sink);
+    }
+
+    osc.start(t);
+    osc.stop(t + 1.85);
+  }
+
+  /** Barely-audible filtered noise transient — military-clock texture. */
+  private bgmTick(ctx: AudioContext, sink: GainNode, t: number): void {
+    const noise = this.makeNoiseSource(ctx);
+    if (!noise) return;
+
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 5500;
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.016, t);
+    env.gain.exponentialRampToValueAtTime(EPSILON, t + 0.028);
+
+    noise.connect(hp).connect(env).connect(sink);
+    noise.start(t);
+    noise.stop(t + 0.04);
   }
 }
 

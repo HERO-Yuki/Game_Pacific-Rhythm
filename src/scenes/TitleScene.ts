@@ -5,6 +5,7 @@ import {
   DIFFICULTY_ORDER,
   type Difficulty,
 } from "../config/difficulty";
+import { audio } from "../audio/AudioManager";
 import { formatBestSummary } from "../utils/records";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 
@@ -32,6 +33,7 @@ export class TitleScene extends Phaser.Scene {
   }> = [];
   private titleText?: Phaser.GameObjects.Text;
   private starting = false;
+  private bgmStarted = false;
 
   constructor() {
     super("TitleScene");
@@ -49,6 +51,7 @@ export class TitleScene extends Phaser.Scene {
 
     this.setupKeyboard();
     this.startHeartbeat();
+    this.tryStartBgm();
 
     // Dela Gothic One ships via the <link> in index.html but the
     // browser may finish loading the font *after* Phaser has rasterised
@@ -216,6 +219,7 @@ export class TitleScene extends Phaser.Scene {
     const btn = this.buttons[this.selectedIndex];
     if (!btn) return;
     const diff: Difficulty = btn.diff;
+    audio.stopTitleBgm();
     // Short fade-to-black transition so the tonal shift from the
     // menu to the combat arena feels intentional.
     this.cameras.main.fadeOut(260, 0, 0, 0);
@@ -225,6 +229,42 @@ export class TitleScene extends Phaser.Scene {
         this.scene.start("MainScene", { difficulty: diff });
       },
     );
+  }
+
+  shutdown(): void {
+    audio.stopTitleBgm();
+    this.bgmStarted = false;
+  }
+
+  // ================================================================
+  //  BGM
+  // ================================================================
+
+  /**
+   * Starts the title BGM as soon as the AudioContext is running.
+   * If it is still suspended (autoplay policy), defers to the first
+   * pointer or key event — whichever fires first.
+   */
+  private tryStartBgm(): void {
+    if (this.bgmStarted) return;
+
+    // AudioContext already running (e.g. returning from MainScene).
+    if (audio.isContextRunning()) {
+      this.bgmStarted = true;
+      audio.startTitleBgm();
+      return;
+    }
+
+    // Defer until the first user gesture unlocks the AudioContext.
+    const onGesture = (): void => {
+      if (this.bgmStarted) return;
+      this.bgmStarted = true;
+      audio.unlock();
+      audio.startTitleBgm();
+    };
+
+    this.input.once("pointerdown", onGesture);
+    this.input.keyboard?.once("keydown", onGesture);
   }
 
   // ================================================================
