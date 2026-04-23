@@ -351,6 +351,67 @@ export class AudioManager {
     }
   }
 
+  /**
+   * EASY / NORMAL game-clear fanfare: ascending C-major arpeggio and a
+   * short noise shimmer. Distinct from battle SFX, meant to read as
+   * “mission complete”.
+   */
+  public playGameClear(opts: PlayOptions = {}): void {
+    const s = this.beginSfx({
+      ...opts,
+      volume: (opts.volume ?? 1) * 0.7,
+    });
+    if (!s) return;
+    const { ctx, sink, now } = s;
+
+    // C4 E4 G4 C5 — quick brassy triangles.
+    const notes: readonly number[] = [261.63, 329.63, 392.0, 523.25];
+    const step = 0.082;
+    for (let i = 0; i < notes.length; i++) {
+      const f = notes[i];
+      const t0 = now + i * step;
+      const osc = ctx.createOscillator();
+      osc.type = "triangle";
+      osc.frequency.value = f;
+
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 3000;
+      const env = ctx.createGain();
+      const peak = 0.2 + i * 0.04;
+      scheduleAR(env.gain, t0, peak, 0.01, 0.2 - i * 0.015);
+
+      osc.connect(lp).connect(env).connect(sink);
+      osc.start(t0);
+      osc.stop(t0 + 0.4);
+    }
+
+    // Fifth echo on a slightly delayed sine — “hall” afterglow.
+    const tEcho = now + 0.38;
+    const echo = ctx.createOscillator();
+    echo.type = "sine";
+    echo.frequency.value = 392.0;
+    const eEnv = ctx.createGain();
+    scheduleAR(eEnv.gain, tEcho, 0.1, 0.04, 0.5);
+    echo.connect(eEnv).connect(sink);
+    echo.start(tEcho);
+    echo.stop(tEcho + 0.6);
+
+    const noise = this.makeNoiseSource(ctx);
+    if (noise) {
+      const t1 = now + 0.36;
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 4800;
+      bp.Q.value = 0.85;
+      const nEnv = ctx.createGain();
+      scheduleAR(nEnv.gain, t1, 0.11, 0.05, 0.22);
+      noise.connect(bp).connect(nEnv).connect(sink);
+      noise.start(t1);
+      noise.stop(t1 + 0.35);
+    }
+  }
+
   // ------------------------------------------------------------------
   //  Title BGM — public API
   // ------------------------------------------------------------------

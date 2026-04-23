@@ -551,6 +551,12 @@ export class MainScene extends Phaser.Scene {
   private seqVsZab!: Phaser.GameObjects.Graphics;
   private goLayer!: Phaser.GameObjects.Container;
   private goScoreText!: Phaser.GameObjects.Text;
+  /**
+   * ENDLESS game-over only: subheading + huge numeric score; absent on
+   * EASY / NORMAL (those modes use a single `goScoreText` line).
+   */
+  private goEndlessScoreLabel?: Phaser.GameObjects.Text;
+  private goEndlessScoreHero?: Phaser.GameObjects.Text;
   /* Game-over Web3 integration refs — only visible on the GO overlay. */
   private goWalletBtn?: Phaser.GameObjects.Container;
   private goWalletBtnLabel?: Phaser.GameObjects.Text;
@@ -1315,30 +1321,65 @@ export class MainScene extends Phaser.Scene {
     // buttons so combat buttons behind the overlay can't be mis-fired
     // on the last frame before a RETRY rebuilds the scene.
     dim.setInteractive();
+    const endless = isEndless(this.difficulty);
+    const titleY = endless ? H * 0.12 : H / 2 - 76;
     const title = this.add
-      .text(W / 2, H / 2 - 76, "GAME OVER", {
+      .text(W / 2, titleY, "GAME OVER", {
         fontFamily: FONT,
         fontSize: "42px",
         color: "#ff4444",
         fontStyle: "bold",
       })
       .setOrigin(0.5);
-    this.goScoreText = this.txt(W / 2, H / 2 - 8, "", 18, "#e6edf3")
-      .setOrigin(0.5)
-      .setAlign("center");
+
+    const rowY = endless ? H * 0.68 : H / 2 + 68;
+    const connectY = endless ? H * 0.8 : H / 2 + 128;
+    const submitY = endless ? H * 0.875 : H / 2 + 168;
+    const web3StatusY = endless ? H * 0.92 : H / 2 + 202;
+
+    if (endless) {
+      const heroSize = Math.max(56, Math.min(96, Math.round(H * 0.15)));
+      this.goEndlessScoreLabel = this.add
+        .text(W / 2, H * 0.24, "FINAL SCORE", {
+          fontFamily: FONT,
+          fontSize: "15px",
+          color: "#8b95a6",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5);
+      this.goEndlessScoreHero = this.add
+        .text(W / 2, H * 0.33, "0", {
+          fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
+          fontSize: `${heroSize}px`,
+          color: "#ffdd55",
+          stroke: "#3a2000",
+          strokeThickness: Math.max(4, Math.round(heroSize * 0.08)),
+        })
+        .setOrigin(0.5)
+        .setShadow(0, 4, "#ff9a1f", 12, true, true);
+      this.goScoreText = this.txt(W / 2, H * 0.5, "", 16, "#c4ccd8")
+        .setOrigin(0.5)
+        .setAlign("center");
+    } else {
+      this.goEndlessScoreLabel = undefined;
+      this.goEndlessScoreHero = undefined;
+      this.goScoreText = this.txt(W / 2, H / 2 - 8, "", 18, "#e6edf3")
+        .setOrigin(0.5)
+        .setAlign("center");
+    }
 
     // Two-button row: RETRY (same difficulty) on the left,
     // BACK TO TITLE on the right. Sized for comfortable thumb taps.
     const retry = this.makeMenuButton(
       W / 2 - 110,
-      H / 2 + 68,
+      rowY,
       "RETRY",
       0x2a354e,
       () => this.scene.restart({ difficulty: this.difficulty }),
     );
     const back = this.makeMenuButton(
       W / 2 + 110,
-      H / 2 + 68,
+      rowY,
       "BACK TO TITLE",
       0x1a1f2e,
       () => this.scene.start("TitleScene"),
@@ -1351,7 +1392,7 @@ export class MainScene extends Phaser.Scene {
     // when the browser has no EIP-1193 provider injected.
     const connectBtn = this.makeMenuButton(
       W / 2,
-      H / 2 + 128,
+      connectY,
       "[ Connect Web3 Wallet ]",
       0x2b3a66,
       () => this.onConnectWalletClick(),
@@ -1362,7 +1403,7 @@ export class MainScene extends Phaser.Scene {
 
     const submitBtn = this.makeMenuButton(
       W / 2,
-      H / 2 + 168,
+      submitY,
       "[ Submit Score to Ethereum ]",
       0x3a2b66,
       () => this.onSubmitScoreClick(),
@@ -1373,20 +1414,26 @@ export class MainScene extends Phaser.Scene {
     submitBtn.setVisible(false).disableInteractive();
     this.goSubmitBtn = submitBtn;
 
-    this.goWeb3Status = this.txt(W / 2, H / 2 + 202, "", 12, "#8a95a8")
+    this.goWeb3Status = this.txt(W / 2, web3StatusY, "", 12, "#8a95a8")
       .setOrigin(0.5)
       .setAlign("center");
 
-    this.goLayer = this.add.container(0, 0, [
-      dim,
-      title,
+    const goChildren: Phaser.GameObjects.GameObject[] = [dim, title];
+    if (endless) {
+      goChildren.push(
+        this.goEndlessScoreLabel!,
+        this.goEndlessScoreHero!,
+      );
+    }
+    goChildren.push(
       this.goScoreText,
       retry,
       back,
       connectBtn,
       submitBtn,
       this.goWeb3Status,
-    ]);
+    );
+    this.goLayer = this.add.container(0, 0, goChildren);
     this.goLayer.setVisible(false).setDepth(DEPTH.gameOver);
   }
 
@@ -1642,24 +1689,146 @@ export class MainScene extends Phaser.Scene {
   private showGameClearOverlay(timeMs: number): void {
     const W = this.scale.width;
     const H = this.scale.height;
+    const cx = W / 2;
+    const cy = H * 0.44;
+    const d = DEPTH.gameOver;
+
+    audio.playGameClear();
+
+    this.cameras.main.resetFX();
+    this.cameras.main.flash(180, 255, 245, 190, true);
+    this.cameras.main.shake(280, 0.006);
+    const cam = this.cameras.main;
+    this.tweens.add({
+      targets: cam,
+      zoom: { from: 1, to: 1.035 },
+      duration: 420,
+      ease: "Sine.easeOut",
+      yoyo: true,
+      onComplete: () => {
+        cam.setZoom(1);
+      },
+    });
+
     const dim = this.add
-      .rectangle(0, 0, W, H, 0x000000, 0.78)
+      .rectangle(0, 0, W, H, 0x020a18, 0.52)
       .setOrigin(0)
-      .setDepth(DEPTH.gameOver);
-    // Block pass-through clicks while the clear overlay plays so the
-    // player can't accidentally poke a stale combat button mid-fade.
-    dim.setInteractive();
+      .setDepth(d);
+    const dim2 = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0.4)
+      .setOrigin(0)
+      .setDepth(d);
+    // Block pass-through clicks while the clear overlay plays (topmost layer).
+    dim2.setInteractive();
+
+    const warmGlow = this.add
+      .circle(cx, cy, Math.max(W, H) * 0.38, 0xffaa44, 0.12)
+      .setDepth(d)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setAlpha(0);
+    this.tweens.add({
+      targets: warmGlow,
+      alpha: { from: 0.08, to: 0.24 },
+      scale: { from: 0.92, to: 1.08 },
+      duration: 900,
+      yoyo: true,
+      repeat: 2,
+      ease: "Sine.easeInOut",
+    });
+
+    const rayGr = this.add.graphics().setDepth(d).setBlendMode(Phaser.BlendModes.ADD);
+    const rayLen = Math.max(W, H) * 0.52;
+    rayGr.lineStyle(2.5, 0xffe8aa, 0.32);
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2;
+      rayGr.lineBetween(0, 0, Math.cos(a) * rayLen, Math.sin(a) * rayLen);
+    }
+    const rayPivot = this.add.container(cx, cy, [rayGr]);
+    rayPivot.setDepth(d).setAlpha(0);
+    this.tweens.add({
+      targets: rayPivot,
+      alpha: 0.5,
+      duration: 600,
+    });
+    this.tweens.add({
+      targets: rayPivot,
+      angle: 360,
+      duration: 36000,
+      repeat: -1,
+      ease: "Linear",
+    });
+    this.tweens.add({
+      targets: rayPivot,
+      scaleX: 1.2,
+      scaleY: 1.2,
+      duration: 1400,
+      yoyo: true,
+      repeat: 3,
+      ease: "Sine.easeInOut",
+    });
+
+    const burstTint = [0xffee55, 0xffffff, 0xffaa33, 0x66e8ff, 0xffccff] as const;
+    for (let b = 0; b < 5; b++) {
+      this.time.delayedCall(120 * b, () => {
+        for (let k = 0; k < 3; k++) {
+          const ang = (k / 3) * Math.PI * 2 + b * 0.4;
+          const px = cx + Math.cos(ang) * 40;
+          const py = cy + Math.sin(ang) * 28;
+          this.emitGameClearSparkBurst(
+            px,
+            py,
+            burstTint[(b + k) % burstTint.length]!,
+            0.5 + b * 0.12,
+          );
+        }
+      });
+    }
+    for (let r = 0; r < 4; r++) {
+      const ring = this.add
+        .circle(cx, cy, 36 + r * 22, 0xffcc22, 0.35)
+        .setDepth(d + 1)
+        .setBlendMode(Phaser.BlendModes.ADD);
+      this.tweens.add({
+        targets: ring,
+        delay: r * 90,
+        scale: { from: 0.2, to: 2.4 + r * 0.25 },
+        alpha: { from: 0.55, to: 0 },
+        duration: 700 + r * 80,
+        ease: "Cubic.easeOut",
+        onComplete: () => ring.destroy(),
+      });
+    }
+
+    const modeLabel = DIFFICULTY_CONFIGS[this.difficulty].label;
+    const badge = this.add
+      .text(
+        cx,
+        cy - 108,
+        `${modeLabel}  MODE  CLEARED`,
+        {
+          fontFamily: FONT,
+          fontSize: "17px",
+          color: "#9ef5ff",
+          fontStyle: "bold",
+          stroke: "#002030",
+          strokeThickness: 5,
+        },
+      )
+      .setOrigin(0.5)
+      .setDepth(d + 2)
+      .setAlpha(0);
 
     const title = this.add
-      .text(W / 2, H / 2 - 80, "GAME CLEAR", {
+      .text(cx, cy - 48, "GAME CLEAR", {
         fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
-        fontSize: "52px",
-        color: "#ffd166",
+        fontSize: "60px",
+        color: "#ffee55",
+        stroke: "#4a2a00",
+        strokeThickness: 9,
       })
       .setOrigin(0.5)
-      .setDepth(DEPTH.gameOver)
-      .setShadow(0, 3, "#ff9a1f", 14, false, true)
-      .setScale(0.6);
+      .setDepth(d + 2)
+      .setScale(0.5);
 
     const mm = Math.floor(timeMs / 60000);
     const ss = Math.floor((timeMs % 60000) / 1000)
@@ -1667,52 +1836,108 @@ export class MainScene extends Phaser.Scene {
       .padStart(2, "0");
     const sub = this.add
       .text(
-        W / 2,
-        H / 2 - 12,
-        `${this.difficulty.toUpperCase()}  \u00B7  TIME ${mm}:${ss}`,
+        cx,
+        cy + 32,
+        `TIME  ${mm}:${ss}`,
         {
           fontFamily: FONT,
-          fontSize: "20px",
-          color: "#e6edf3",
+          fontSize: "24px",
+          color: "#f0f4fc",
+          fontStyle: "bold",
         },
       )
       .setOrigin(0.5)
-      .setDepth(DEPTH.gameOver);
+      .setDepth(d + 2);
 
     const stats = this.add
       .text(
-        W / 2,
-        H / 2 + 22,
+        cx,
+        cy + 72,
         `Waves ${this.wave}  \u00B7  Bosses ${this.bossesDefeated}` +
           `  \u00B7  Gigas ${this.gigasDefeated}`,
         {
           fontFamily: FONT,
-          fontSize: "15px",
-          color: "#8b949e",
+          fontSize: "16px",
+          color: "#a8b0bc",
         },
       )
       .setOrigin(0.5)
-      .setDepth(DEPTH.gameOver);
+      .setDepth(d + 2);
 
-    const hint = this.add
-      .text(W / 2, H - 40, "returning to title\u2026", {
+    const stars = "★ ★ ★";
+    const row = this.add
+      .text(cx, cy + 110, stars, {
         fontFamily: FONT,
-        fontSize: "12px",
-        color: "#6e7681",
+        fontSize: "22px",
+        color: "#ffd24a",
       })
       .setOrigin(0.5)
-      .setDepth(DEPTH.gameOver);
+      .setDepth(d + 2)
+      .setScale(0.3);
+
+    const hint = this.add
+      .text(cx, H - 36, "Returning to title\u2026", {
+        fontFamily: FONT,
+        fontSize: "13px",
+        color: "#7d8694",
+      })
+      .setOrigin(0.5)
+      .setDepth(d + 2);
 
     this.tweens.add({
       targets: title,
-      scale: { from: 0.6, to: 1 },
-      duration: 480,
+      scale: { from: 0.5, to: 1 },
+      duration: 520,
       ease: "Back.easeOut",
     });
-    [dim, sub, stats, hint].forEach((o) => {
-      o.setAlpha(0);
-      this.tweens.add({ targets: o, alpha: 1, duration: 480 });
+    this.tweens.add({
+      targets: badge,
+      alpha: 1,
+      duration: 400,
+      delay: 200,
     });
+    this.tweens.add({
+      targets: row,
+      scale: 1,
+      duration: 500,
+      delay: 350,
+      ease: "Back.easeOut",
+    });
+    this.tweens.add({
+      targets: row,
+      angle: { from: -6, to: 6 },
+      duration: 350,
+      yoyo: true,
+      repeat: 1,
+      delay: 400,
+    });
+    this.time.delayedCall(450, () => audio.playClick({ volume: 0.45 }));
+    [dim, dim2, sub, stats, hint, row].forEach((o) => {
+      o.setAlpha(0);
+      this.tweens.add({ targets: o, alpha: 1, duration: 420 });
+    });
+  }
+
+  /** Dense spark cloud for the game-clear screen (gold / white / cyan tints). */
+  private emitGameClearSparkBurst(
+    x: number,
+    y: number,
+    tint: number,
+    speedMul: number,
+  ): void {
+    const emitter = this.add.particles(x, y, "spark", {
+      speed: { min: 90 * speedMul, max: 320 * speedMul },
+      angle: { min: 0, max: 360 },
+      scale: { start: 2.1, end: 0 },
+      tint,
+      lifespan: 520,
+      quantity: 18,
+      emitting: false,
+    });
+    emitter.setDepth(DEPTH.gameOver + 2);
+    emitter.setBlendMode(Phaser.BlendModes.ADD);
+    emitter.explode(18);
+    this.time.delayedCall(700, () => emitter.destroy());
   }
 
   /**
@@ -3025,15 +3250,26 @@ export class MainScene extends Phaser.Scene {
     this.setPhaseDisplay("GAME OVER", "#ff4444");
     console.log(`[GameOver] ${reason} | Score: ${this.score}`);
 
-    let extraStats = "";
-    if (isEndless(this.difficulty)) {
-      extraStats =
-        `\nWaves ${this.score}  \u00B7  Bosses ${this.bossesDefeated}  \u00B7  Gigas ${this.gigasDefeated}`;
-    }
+    const extraStatsLine =
+      `Waves ${this.score}  \u00B7  Bosses ${this.bossesDefeated}  \u00B7  Gigas ${this.gigasDefeated}`;
 
-    this.goScoreText.setText(
-      `Score: ${this.score}  \u2014 ${reason}${extraStats}`,
-    );
+    if (isEndless(this.difficulty) && this.goEndlessScoreHero) {
+      this.tweens.killTweensOf(this.goEndlessScoreHero);
+      this.goEndlessScoreHero.setText(String(this.score));
+      this.goEndlessScoreHero.setScale(0.35);
+      this.goEndlessScoreHero.setAlpha(1);
+      this.tweens.add({
+        targets: this.goEndlessScoreHero,
+        scale: 1,
+        duration: 600,
+        ease: "Back.easeOut",
+      });
+      this.goScoreText.setText(`${reason}\n\n${extraStatsLine}`);
+    } else {
+      this.goScoreText.setText(
+        `Score: ${this.score}  \u2014 ${reason}`,
+      );
+    }
     // Sync the Web3 widgets with the current wallet state before the
     // overlay fades in (handles the "already connected from previous
     // run" case where we can skip straight to the submit button).
@@ -3070,9 +3306,8 @@ export class MainScene extends Phaser.Scene {
 
     this.showGameClearOverlay(timeMs);
 
-    // Brief celebration, then bounce back to the title so the player
-    // can reselect difficulty without an extra click.
-    const RETURN_DELAY = 3200;
+    // Let the full clear fanfare and VFX read before the title hand-off.
+    const RETURN_DELAY = 5000;
     this.time.delayedCall(RETURN_DELAY, () => this.returnToTitle());
   }
 
