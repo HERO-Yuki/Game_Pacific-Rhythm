@@ -33,6 +33,12 @@ export interface DifficultyConfig {
   readonly hasWeather: boolean;
   /** One-line tagline shown beneath the button on the title screen. */
   readonly tagline: string;
+  /**
+   * Beat interval in milliseconds for both the rhythm and resolution phases.
+   * Lower value = faster tempo. 1000 ms = 60 BPM (the intended "normal" feel).
+   * EASY uses a longer interval to give learners extra time to read and react.
+   */
+  readonly beatMs: number;
 }
 
 export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> =
@@ -43,6 +49,9 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
       phases: 5,
       hasWeather: false,
       tagline: "5 phases · no weather · learn the rhythm",
+      // 48 BPM — 25% slower than normal; gives learners more
+      // reading time without breaking the rhythmic feel.
+      beatMs: 1250,
     },
     normal: {
       id: "normal",
@@ -50,6 +59,7 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
       phases: 7,
       hasWeather: true,
       tagline: "7 phases · weather on · the intended ride",
+      beatMs: 1000, // 60 BPM — intended tempo
     },
     endless: {
       id: "endless",
@@ -57,6 +67,8 @@ export const DIFFICULTY_CONFIGS: Readonly<Record<Difficulty, DifficultyConfig>> 
       phases: Infinity,
       hasWeather: true,
       tagline: "no end · weather on · chase the best score",
+      // 起動直後（wave1・phase0）の基準; 以降は `beatMsForEndlessWave` で上書き
+      beatMs: 1000, // 60 BPM
     },
   } as const;
 
@@ -81,4 +93,32 @@ export function maxWavesForDifficulty(diff: Difficulty): number {
 
 export function isEndless(diff: Difficulty): boolean {
   return DIFFICULTY_CONFIGS[diff].phases === Infinity;
+}
+
+/** エンドレス開始 BPM（`beatMs` 1000 ms と同じ 60）。 */
+export const ENDLESS_BPM_BASE = 60;
+
+/** フェーズ（`BOSS_EVERY` 波ブロック）ごとに上げる BPM 幅。 */
+export const ENDLESS_BPM_RISE_PER_PHASE = 2;
+
+/**
+ * 極端に速くなりすぎるのを防ぐ上限。ゲーム性に合わせて調整可。
+ * `phaseIndex` が大きいほど `ENDLESS_BPM_MAX` に張り付く。
+ */
+export const ENDLESS_BPM_MAX = 200;
+
+/**
+ * エンドレス専用: 1-based `wave` に対応する 1 拍の長さ (ms)。
+ * フェーズ番号は `Math.floor((wave - 1) / BOSS_EVERY)`（天候と同じ区切り）。
+ */
+export function beatMsForEndlessWave(wave: number): number {
+  if (wave < 1) {
+    return DIFFICULTY_CONFIGS.endless.beatMs;
+  }
+  const phaseIdx = Math.max(0, Math.floor((wave - 1) / BOSS_EVERY));
+  const bpm = Math.min(
+    ENDLESS_BPM_BASE + ENDLESS_BPM_RISE_PER_PHASE * phaseIdx,
+    ENDLESS_BPM_MAX,
+  );
+  return Math.max(1, Math.round(60000 / bpm));
 }

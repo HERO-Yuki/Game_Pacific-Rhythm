@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { audio } from "../audio/AudioManager";
 import {
+  beatMsForEndlessWave,
   DIFFICULTY_CONFIGS,
   isEndless,
   maxWavesForDifficulty,
@@ -70,8 +71,8 @@ enum GamePhase {
 
 // ======================== Constants ========================
 
-const RHYTHM_MS = 1000;
-const RESOLVE_MS = 500;
+/** Fallback tempo used when difficulty config is not yet available. */
+const RHYTHM_MS_DEFAULT = 1000;
 const INPUT_WINDOW_MS = 200;
 const SEQ_LEN = 4;
 const TOTAL_BEATS = SEQ_LEN * 2;
@@ -101,13 +102,14 @@ const OVERHEAT_STREAK_LIMIT = 3;
 const HEAT_DANGER = 80;
 
 /**
- * Hit-stop durations per event kind (milliseconds). Tuned to roughly
- * 150–200 ms — long enough to register an impact without hurting pace.
+ * Hit-stop durations per event kind (milliseconds).
+ * CLASH / BREAK are kept short so tween freeze time does not fight the
+ * resolution metronome or read as rhythm lag.
  */
 const HITSTOP_MS = {
-  clash: 180,
+  clash: 85,
   special: 180,
-  break: 200,
+  break: 90,
   vulnerable: 160,
 } as const;
 
@@ -120,6 +122,8 @@ const DEPTH = {
   popText: 50,
   rhythmCursor: 10,
   heatVignette: 90,
+  /** Boss / Giga pre-fight WARNING — above combat UI, below game-over. */
+  rankWarning: 99,
   gameOver: 100,
 } as const;
 
@@ -145,8 +149,9 @@ const HEAT_DELTA = {
 
 const PAL = {
   bg: 0x0b0f14,
-  slotBg: 0x1a1f2e,
-  slotStroke: 0x3d4663,
+  /** Slightly deeper than legacy slot for contrast against HUD back. */
+  slotBg: 0x121722,
+  slotStroke: 0x4a5a78,
   highlight: 0xffcc00,
   hpGreen: 0x44cc44,
   heatOrange: 0xff6600,
@@ -286,6 +291,18 @@ const PAN_KAIJU = -0.5;
 const PAN_PLAYER = 0.5;
 
 const FONT = "system-ui, 'Segoe UI', sans-serif";
+/** 文字強用 — 桜井氏式の可読性: 太い縁 + 影 */
+const HUD_STROKE_THICK = 4;
+const HUD_SHADOW = {
+  offsetX: 2,
+  offsetY: 2,
+  color: "#000000",
+  blur: 0,
+  fill: true,
+} as const;
+const STEP_INACTIVE = "#4a5a6a";
+const STEP_K_ACTIVE = "#ffddcc";
+const STEP_P_ACTIVE = "#ccffff";
 
 /** Named VFX colour palette — avoids magic numbers in executeCombat. */
 const VFX = {
@@ -322,6 +339,12 @@ interface BtnUI {
   container: Phaser.GameObjects.Container;
   bg: Phaser.GameObjects.Rectangle;
   action: ActionType;
+}
+
+/** シーケンサー上 1–4 番。背後 ADD グロー + 手前の太字・縁取り。 */
+interface StepIndexUI {
+  glow: Phaser.GameObjects.Text;
+  main: Phaser.GameObjects.Text;
 }
 
 // ================================================================
@@ -371,11 +394,24 @@ export class MainScene extends Phaser.Scene {
    * player can commit to a plan; re-rolled every wave.
    */
   private kaijuNoiseMask: boolean[] = [];
+  /** Set in applyKaijuRank — BOSS 撃破条件に使用 */
+  private currentKaijuRank: KaijuRank = "zako";
   private score = 0;
   private ohStreak = 0;
   private phase = GamePhase.RHYTHM_KAIJU;
   private kaijuSeq: ActionType[] = [];
   private playerSeq: ActionType[] = [];
+
+  /* ---------- tempo (difficulty-dependent) ---------- */
+  /**
+   * Beat interval in ms for both the rhythm and resolution phases.
+   * Sourced from DIFFICULTY_CONFIGS[difficulty].beatMs in init().
+   * Stored as an instance field so every timing calculation reads the
+   * same value without touching module-level constants.
+   */
+  private rhythmMs = RHYTHM_MS_DEFAULT;
+  /** Resolution phase uses the same interval for rhythmic continuity. */
+  private resolveMs = RHYTHM_MS_DEFAULT;
 
   /* ---------- beat-count rhythm state ---------- */
   private rhythmStartTime = 0;
@@ -403,6 +439,12 @@ export class MainScene extends Phaser.Scene {
   private heatDangerActive = false;
   private heatVignette!: Phaser.GameObjects.Rectangle;
   private heatAlertTween?: Phaser.Tweens.Tween;
+  /** Container wrapping the heat gauge bar; shaken when heat ≥ HEAT_DANGER. */
+  private heatGaugeContainer!: Phaser.GameObjects.Container;
+  /** Rest position of the heat gauge container — restored after shake ends. */
+  private heatGaugeRestX = 0;
+  private heatGaugeRestY = 0;
+  private heatShakeTween?: Phaser.Tweens.Tween;
 
   /* ---------- UI refs ---------- */
   /**
@@ -425,7 +467,14 @@ export class MainScene extends Phaser.Scene {
   private pSlots: SlotUI[] = [];
   private btns: BtnUI[] = [];
   private phaseLabel!: Phaser.GameObjects.Text;
-  private scoreLabel!: Phaser.GameObjects.Text;
+  /** 戦績: 💀 + 撃破数 + WAVE 行。パネル内で autoscale。 */
+  private scoreHudPanel!: Phaser.GameObjects.Container;
+  private scoreHudBg!: Phaser.GameObjects.Rectangle;
+  private scoreKillsText!: Phaser.GameObjects.Text;
+  private scoreWaveText!: Phaser.GameObjects.Text;
+  /** シーケンサー上 1–4 番 (K 列 / P 列) */
+  private stepIndexK: StepIndexUI[] = [];
+  private stepIndexP: StepIndexUI[] = [];
   /** Top-left weather indicator — big name + small modifier note. */
   private weatherLabel!: Phaser.GameObjects.Text;
   private weatherDetailLabel!: Phaser.GameObjects.Text;
@@ -496,6 +545,14 @@ export class MainScene extends Phaser.Scene {
     this.difficulty =
       requested && requested in DIFFICULTY_CONFIGS ? requested : "normal";
     this.maxWave = maxWavesForDifficulty(this.difficulty);
+    // Derive tempo from the difficulty config so EASY can run at a
+    // slower BPM without any per-difficulty branch in gameplay code.
+    if (isEndless(this.difficulty)) {
+      this.rhythmMs = beatMsForEndlessWave(1);
+    } else {
+      this.rhythmMs = DIFFICULTY_CONFIGS[this.difficulty].beatMs;
+    }
+    this.resolveMs = this.rhythmMs;
   }
 
   create(): void {
@@ -530,7 +587,7 @@ export class MainScene extends Phaser.Scene {
     this.input.keyboard?.once("keydown", unlock);
 
     notifyWavedashLoadComplete();
-    this.beginWave();
+    this.showReadyThenBeginWave();
   }
 
   update(): void {
@@ -548,6 +605,7 @@ export class MainScene extends Phaser.Scene {
     this.currentPhaseIndex = -1;
     this.currentWeather = "clear";
     this.kaijuNoiseMask = [];
+    this.currentKaijuRank = "zako";
     this.score = 0;
     this.bossesDefeated = 0;
     this.gigasDefeated = 0;
@@ -582,8 +640,10 @@ export class MainScene extends Phaser.Scene {
     const W = this.scale.width;
     const H = this.scale.height;
 
+    this.buildControlDeckBack(W, H);
+
     this.phaseLabel = this.txt(W / 2, 16, "", 18, "#8b949e").setOrigin(0.5, 0);
-    this.scoreLabel = this.txt(W - 20, 16, "", 15, "#6e7681").setOrigin(1, 0);
+    this.buildScoreHud(W);
     this.refreshProgressHUD();
     // Weather indicator lives on the otherwise empty top-left shelf.
     // Two stacked lines so the modifier summary is legible at a glance
@@ -593,7 +653,7 @@ export class MainScene extends Phaser.Scene {
       0,
       0,
     );
-    this.msgLabel = this.txt(W / 2, H * 0.47, "", 16, "#ffcc00")
+    this.msgLabel = this.txt(W / 2, H * 0.53, "", 16, "#ffcc00")
       .setOrigin(0.5)
       .setAlpha(0);
 
@@ -603,6 +663,8 @@ export class MainScene extends Phaser.Scene {
     this.buildButtons(W, H);
     this.buildHeatOverlay(W, H);
     this.buildGameOver(W, H);
+    this.buildCockpitChrome(W, H);
+    this.buildMonitorOverlay(W, H);
   }
 
   /**
@@ -620,16 +682,16 @@ export class MainScene extends Phaser.Scene {
   }
 
   private buildCharacters(W: number, H: number): void {
-    const cy = H * 0.22;
+    // Upper half: combat area sits in the top ~50 % of the screen.
+    const cy = H * 0.27;
     const sz = Math.min(80, W * 0.085);
     this.baseBodySize = sz;
     this.barMaxW = sz * 1.6;
     const barH = 7;
     const barGap = 14;
 
+    // ---- Kaiju (left side) ----
     const kx = W * 0.25;
-    // Start as zako; beginWave() re-applies the correct rank on every
-    // encounter so texture/scale stay in sync with the wave counter.
     this.kaijuBody = this.add
       .image(kx, cy, KAIJU_STATS.zako.texture)
       .setDisplaySize(sz, sz);
@@ -660,10 +722,13 @@ export class MainScene extends Phaser.Scene {
       KAIJU_STATS.zako.labelColor,
     ).setOrigin(0.5, 0);
 
+    // ---- Player (right side) ----
     const px = W * 0.75;
     this.playerBody = this.add
       .image(px, cy, "mech-player")
       .setDisplaySize(sz, sz);
+
+    // HP bar (above the body)
     const hpBarY = cy - sz / 2 - barGap * 2;
     this.add
       .rectangle(px, hpBarY, this.barMaxW, barH, 0x222222)
@@ -685,88 +750,112 @@ export class MainScene extends Phaser.Scene {
       "#44cc44",
     ).setOrigin(0.5, 1);
 
+    // Heat gauge — wrapped in a container so the whole gauge can be
+    // shaken as a unit when heat enters the danger zone.
     const heatBarY = cy - sz / 2 - barGap + 2;
-    this.add
-      .rectangle(px, heatBarY, this.barMaxW, barH, 0x222222)
-      .setOrigin(0.5);
-    this.playerHeatBar = this.add
-      .rectangle(
-        px - this.barMaxW / 2,
-        heatBarY,
-        this.barMaxW,
-        barH,
-        PAL.heatOrange,
-      )
+    const heatBg = this.add
+      .rectangle(-this.barMaxW / 2, 0, this.barMaxW, barH + 2, 0x1a1a1a)
       .setOrigin(0, 0.5);
-    this.playerHeatText = this.txt(px, cy + sz / 2 + 8, "", 12, "#ff6600").setOrigin(
-      0.5,
-      0,
-    );
-    this.txt(px, cy + sz / 2 + 24, "PLAYER", 11, "#3366cc").setOrigin(0.5, 0);
+    this.playerHeatBar = this.add
+      .rectangle(-this.barMaxW / 2, 0, this.barMaxW, barH, 0x00ffff)
+      .setOrigin(0, 0.5);
+    // "HEAT" descriptor label inside the container
+    this.playerHeatText = this.add
+      .text(this.barMaxW / 2, -barH - 1, "HEAT", {
+        fontFamily: FONT,
+        fontSize: "9px",
+        color: "#336666",
+      })
+      .setOrigin(0.5, 1);
+
+    this.heatGaugeContainer = this.add.container(px, heatBarY, [
+      heatBg,
+      this.playerHeatBar,
+      this.playerHeatText,
+    ]);
+    this.heatGaugeRestX = px;
+    this.heatGaugeRestY = heatBarY;
+
+    this.txt(px, cy + sz / 2 + 8, "PLAYER", 11, "#3366cc").setOrigin(0.5, 0);
   }
 
   private buildSequencer(W: number, H: number): void {
-    const y = H * 0.55;
+    const y = H * 0.65;
     this.slotSz = Math.min(56, W * 0.058);
     const gap = 10;
     const groupW = SEQ_LEN * this.slotSz + (SEQ_LEN - 1) * gap;
     const mid = W / 2;
     const sep = 24;
 
-    this.txt(
+    this.txtHud(
       mid - sep - groupW / 2,
       y - this.slotSz / 2 - 18,
       "KAIJU",
       11,
-      "#cc3333",
-    ).setOrigin(0.5, 1);
-    this.txt(
+      "#ee6666",
+      0.5,
+      1,
+    );
+    this.txtHud(
       mid + sep + groupW / 2,
       y - this.slotSz / 2 - 18,
       "PLAYER",
       11,
-      "#3366cc",
-    ).setOrigin(0.5, 1);
+      "#6699ff",
+      0.5,
+      1,
+    );
 
     this.kSlots = [];
     this.pSlots = [];
+    this.stepIndexK = [];
+    this.stepIndexP = [];
 
     for (let i = 0; i < SEQ_LEN; i++) {
       const ksx =
         mid - sep - groupW + this.slotSz / 2 + i * (this.slotSz + gap);
       const psx = mid + sep + this.slotSz / 2 + i * (this.slotSz + gap);
-      this.txt(ksx, y - this.slotSz / 2 - 4, `${i + 1}`, 9, "#4a5568").setOrigin(
-        0.5,
-        1,
-      );
-      this.txt(psx, y - this.slotSz / 2 - 4, `${i + 1}`, 9, "#4a5568").setOrigin(
-        0.5,
-        1,
-      );
+      const num = `${i + 1}`;
+      const pairK = this.createStepIndexPair(ksx, y - this.slotSz / 2 - 3, num, "k");
+      this.stepIndexK.push(pairK);
+      const pairP = this.createStepIndexPair(psx, y - this.slotSz / 2 - 3, num, "p");
+      this.stepIndexP.push(pairP);
       this.kSlots.push(this.makeSlot(ksx, y, this.slotSz));
       this.pSlots.push(this.makeSlot(psx, y, this.slotSz));
     }
 
-    this.txt(mid, y, "VS", 12, "#4a5568").setOrigin(0.5);
+    this.txtHud(mid, y, "VS", 12, "#9aa5b4", 0.5, 0.5);
   }
 
   private makeSlot(x: number, y: number, sz: number): SlotUI {
-    const bg = this.add.rectangle(x, y, sz, sz, PAL.slotBg);
+    const bg = this.add.rectangle(x, y, sz, sz, PAL.slotBg, 0.98);
     const border = this.add.rectangle(x, y, sz, sz);
     border.setFillStyle();
     border.setStrokeStyle(2, PAL.slotStroke);
-    const label = this.txt(x, y, "", 13, "#e6edf3").setOrigin(0.5);
+    const label = this.add
+      .text(x, y, "", {
+        font: '800 13px system-ui, "Segoe UI", sans-serif',
+        color: "#e6edf3",
+        stroke: "#000000",
+        strokeThickness: 3,
+        shadow: { offsetX: 1, offsetY: 1, color: "#000", blur: 0, fill: true },
+      })
+      .setOrigin(0.5);
     return { bg, border, label };
   }
 
   private buildRhythmIndicators(W: number, H: number): void {
-    const seqY = H * 0.55;
+    const seqY = H * 0.65;
     const sz = this.slotSz;
 
-    this.rhythmCursor = this.add.rectangle(0, seqY, sz + 10, sz + 10);
+    // Scan cursor: ADD blend mode gives a cyber-glow feel.
+    this.rhythmCursor = this.add.rectangle(0, seqY, sz + 12, sz + 12);
     this.rhythmCursor.setFillStyle();
-    this.rhythmCursor.setStrokeStyle(3, PAL.cursor);
-    this.rhythmCursor.setVisible(false).setDepth(DEPTH.rhythmCursor);
+    this.rhythmCursor.setStrokeStyle(4, PAL.cursor);
+    this.rhythmCursor
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setVisible(false)
+      .setDepth(DEPTH.rhythmCursor);
 
     this.timingBar = this.add.rectangle(
       0,
@@ -781,7 +870,7 @@ export class MainScene extends Phaser.Scene {
 
     this.beatFlash = this.add.rectangle(
       W / 2,
-      seqY - sz / 2 - 26,
+      seqY - sz / 2 - 28,
       W * 0.6,
       2,
       PAL.cursor,
@@ -791,7 +880,7 @@ export class MainScene extends Phaser.Scene {
   }
 
   private buildButtons(W: number, H: number): void {
-    const by = H * 0.8;
+    const by = H * 0.855;
     const acts: ActionType[] = [
       ActionType.ATTACK,
       ActionType.GUARD,
@@ -824,22 +913,24 @@ export class MainScene extends Phaser.Scene {
       const bg = this.add
         .rectangle(0, 0, bw, bh, pal.on)
         .setStrokeStyle(2, ACT_COL[action]);
-      // Emoji + label keeps iconography language-independent while
-      // still letting keyboard users memorise the text name.
-      const lbl = this.txt(
-        0,
-        -9,
-        `${ACT_EMOJI[action]} ${action}`,
-        14,
-        "#e6edf3",
-      ).setOrigin(0.5);
-      const keyHint = this.txt(
-        0,
-        13,
-        ACT_KEY_HINT[action],
-        10,
-        "#8b949e",
-      ).setOrigin(0.5);
+      const lbl = this.add
+        .text(0, -9, `${ACT_EMOJI[action]} ${action}`, {
+          font: '800 14px system-ui, "Segoe UI", sans-serif',
+          color: "#e6edf3",
+          stroke: "#000000",
+          strokeThickness: HUD_STROKE_THICK,
+          shadow: HUD_SHADOW,
+        })
+        .setOrigin(0.5);
+      const keyHint = this.add
+        .text(0, 13, ACT_KEY_HINT[action], {
+          font: '800 10px system-ui, "Segoe UI", sans-serif',
+          color: "#b0bac8",
+          stroke: "#000000",
+          strokeThickness: 3,
+          shadow: { offsetX: 1, offsetY: 1, color: "#000", blur: 0, fill: true },
+        })
+        .setOrigin(0.5);
 
       const ctr = this.add
         .container(bx, by, [bg, lbl, keyHint])
@@ -877,13 +968,15 @@ export class MainScene extends Phaser.Scene {
       this.btns.push({ container: ctr, bg, action });
     }
 
-    this.txt(
+    this.txtHud(
       W / 2,
-      by + bh / 2 + 14,
+      by + bh / 2 + 16,
       "Tap or press WASD / arrow keys in rhythm to program your sequence.",
       11,
-      "#4a5568",
-    ).setOrigin(0.5, 0);
+      "#b8c0ce",
+      0.5,
+      0,
+    );
   }
 
   /**
@@ -1402,7 +1495,7 @@ export class MainScene extends Phaser.Scene {
       this.kaijuBody,
       this.playerBody,
       this.phaseLabel,
-      this.scoreLabel,
+      this.scoreHudPanel,
       ...this.btns.map((b) => b.container),
     ];
     this.bounceTargets = items.map((obj) => ({
@@ -1437,6 +1530,218 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * HUD 用: 太字 + 黒縁 4px + 2px ドロップシャドウ。視認性優先。
+   */
+  private txtHud(
+    x: number,
+    y: number,
+    str: string,
+    size: number,
+    color: string,
+    originX: number,
+    originY: number,
+  ): Phaser.GameObjects.Text {
+    return this.add
+      .text(x, y, str, {
+        font: `800 ${size}px system-ui, "Segoe UI", sans-serif`,
+        color,
+        stroke: "#000000",
+        strokeThickness: HUD_STROKE_THICK,
+        shadow: HUD_SHADOW,
+      })
+      .setOrigin(originX, originY);
+  }
+
+  /**
+   * 下半分のコントロールデッキ用背景。不透明度を上げて手前の
+   * 白文字を浮かせる。
+   */
+  private buildControlDeckBack(W: number, H: number): void {
+    const y0 = H * 0.52;
+    const h = H - y0;
+    this.add
+      .rectangle(W / 2, y0 + h / 2, W, h, 0x05070c, 0.82)
+      .setStrokeStyle(1, 0x2a3848, 0.65)
+      .setDepth(-2);
+  }
+
+  /**
+   * 右上: 💀 撃破数 + WAVE 行。枠内 90% を超えたら `fontSize` を縮小。
+   */
+  private buildScoreHud(W: number): void {
+    const panelW = Math.min(220, W * 0.3);
+    const padX = 12;
+    const padY = 8;
+
+    this.scoreHudPanel = this.add.container(W - 16, 12);
+    this.scoreHudPanel.setName("scoreHud");
+
+    this.scoreHudBg = this.add
+      .rectangle(0, 0, panelW, 52, 0x10151f, 0.94)
+      .setOrigin(1, 0)
+      .setStrokeStyle(1, 0x3a4a62, 0.85);
+
+    this.scoreKillsText = this.add
+      .text(-padX, padY, "\uD83D\uDC80 0", {
+        font: '900 17px system-ui, "Segoe UI", sans-serif',
+        color: "#d8e0ea",
+        stroke: "#000000",
+        strokeThickness: HUD_STROKE_THICK,
+        shadow: HUD_SHADOW,
+      })
+      .setOrigin(1, 0);
+
+    this.scoreWaveText = this.add
+      .text(-padX, padY + 20, "WAVE", {
+        font: '800 12px system-ui, "Segoe UI", sans-serif',
+        color: "#8a95a8",
+        stroke: "#000000",
+        strokeThickness: 3,
+        shadow: { offsetX: 1, offsetY: 1, color: "#000", blur: 0, fill: true },
+      })
+      .setOrigin(1, 0);
+
+    this.scoreHudPanel.add([this.scoreHudBg, this.scoreKillsText, this.scoreWaveText]);
+  }
+
+  private layoutScoreHud(): void {
+    if (!this.scoreKillsText?.active || !this.scoreWaveText?.active) return;
+
+    const W = this.scale.width;
+    this.scoreHudPanel.setX(W - 16);
+
+    const panelW = Math.min(220, W * 0.3);
+    const innerMax = panelW * 0.9 - 8;
+    const padX = 12;
+    const padY = 8;
+
+    this.scoreKillsText.setText(`\uD83D\uDC80 ${this.score}`);
+
+    let kfs = 17;
+    const setKillStyle = (fs: number): void => {
+      this.scoreKillsText.setStyle({
+        font: `900 ${fs}px system-ui, "Segoe UI", sans-serif`,
+        color: "#d8e0ea",
+        stroke: "#000000",
+        strokeThickness: HUD_STROKE_THICK,
+        shadow: HUD_SHADOW,
+      });
+    };
+    setKillStyle(kfs);
+    while (this.scoreKillsText.width > innerMax && kfs > 8) {
+      kfs -= 1;
+      setKillStyle(kfs);
+    }
+
+    const cap = this.maxWave;
+    if (cap === Infinity) {
+      this.scoreWaveText.setText(`WAVE ${Math.max(1, this.wave)}`);
+    } else {
+      const shown = Math.min(Math.max(1, this.wave), cap);
+      this.scoreWaveText.setText(`WAVE ${shown}/${cap}`);
+    }
+    const waveSh = { offsetX: 1, offsetY: 1, color: "#000", blur: 0, fill: true };
+    let wfs = 12;
+    const setWaveStyle = (fs: number): void => {
+      this.scoreWaveText.setStyle({
+        font: `800 ${fs}px system-ui, "Segoe UI", sans-serif`,
+        color: "#8a95a8",
+        stroke: "#000000",
+        strokeThickness: 3,
+        shadow: waveSh,
+      });
+    };
+    setWaveStyle(wfs);
+    while (this.scoreWaveText.width > innerMax && wfs > 7) {
+      wfs -= 1;
+      setWaveStyle(wfs);
+    }
+
+    const bodyH = padY * 2 + this.scoreKillsText.height + 4 + this.scoreWaveText.height;
+    const bodyW = Math.min(
+      panelW,
+      Math.max(this.scoreKillsText.width, this.scoreWaveText.width) + padX * 2,
+    );
+    this.scoreHudBg.setSize(Math.max(96, bodyW), bodyH);
+  }
+
+  private createStepIndexPair(
+    x: number,
+    y: number,
+    num: string,
+    col: "k" | "p",
+  ): StepIndexUI {
+    const glow = this.add
+      .text(x, y, num, {
+        font: '900 16px system-ui, "Segoe UI", sans-serif',
+        color: col === "k" ? "#ff4422" : "#00ddff",
+        stroke: "#000000",
+        strokeThickness: 2,
+        shadow: { offsetX: 0, offsetY: 0, color: "#000", blur: 6, fill: true },
+      })
+      .setOrigin(0.5, 1)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setAlpha(0.55)
+      .setVisible(false);
+    const main = this.add
+      .text(x, y, num, {
+        font: '800 12px system-ui, "Segoe UI", sans-serif',
+        color: STEP_INACTIVE,
+        stroke: "#000000",
+        strokeThickness: HUD_STROKE_THICK,
+        shadow: HUD_SHADOW,
+      })
+      .setOrigin(0.5, 1);
+    return { glow, main };
+  }
+
+  private setStepIndexVisual(
+    pair: StepIndexUI,
+    col: "k" | "p",
+    active: boolean,
+  ): void {
+    if (active) {
+      pair.glow.setVisible(true).setAlpha(0.5);
+      pair.main.setStyle({
+        color: col === "k" ? STEP_K_ACTIVE : STEP_P_ACTIVE,
+        font: '900 12px system-ui, "Segoe UI", sans-serif',
+        stroke: "#000000",
+        strokeThickness: HUD_STROKE_THICK,
+        shadow: HUD_SHADOW,
+      });
+    } else {
+      pair.glow.setVisible(false);
+      pair.main.setStyle({
+        color: STEP_INACTIVE,
+        font: '800 12px system-ui, "Segoe UI", sans-serif',
+        stroke: "#000000",
+        strokeThickness: HUD_STROKE_THICK,
+        shadow: HUD_SHADOW,
+      });
+    }
+  }
+
+  private refreshSequencerStepHighlight(beat: number): void {
+    for (let i = 0; i < SEQ_LEN; i++) {
+      const k = this.stepIndexK[i];
+      const p = this.stepIndexP[i];
+      if (k) this.setStepIndexVisual(k, "k", false);
+      if (p) this.setStepIndexVisual(p, "p", false);
+    }
+    if (beat < 0) return;
+    if (beat < SEQ_LEN) {
+      const p = this.stepIndexK[beat];
+      if (p) this.setStepIndexVisual(p, "k", true);
+    } else {
+      const pi = beat - SEQ_LEN;
+      if (pi >= 0 && pi < SEQ_LEN) {
+        const p = this.stepIndexP[pi];
+        if (p) this.setStepIndexVisual(p, "p", true);
+      }
+    }
+  }
+
   /* ============================================================ */
   /*  Beat-count rhythm driver                                      */
   /* ============================================================ */
@@ -1447,14 +1752,14 @@ export class MainScene extends Phaser.Scene {
     if (elapsed < 0) return;
 
     if (!this.buttonsReady) {
-      const earlyEnable = SEQ_LEN * RHYTHM_MS - INPUT_WINDOW_MS;
+      const earlyEnable = SEQ_LEN * this.rhythmMs - INPUT_WINDOW_MS;
       if (elapsed >= earlyEnable) {
         this.buttonsReady = true;
         this.enableButtons(true);
       }
     }
 
-    const currentBeat = Math.floor(elapsed / RHYTHM_MS);
+    const currentBeat = Math.floor(elapsed / this.rhythmMs);
 
     while (
       this.lastProcessedBeat < currentBeat &&
@@ -1465,7 +1770,7 @@ export class MainScene extends Phaser.Scene {
     }
 
     if (!this.rhythmEnded && this.lastProcessedBeat >= TOTAL_BEATS - 1) {
-      const lastWindowEnd = (TOTAL_BEATS - 1) * RHYTHM_MS + INPUT_WINDOW_MS;
+      const lastWindowEnd = (TOTAL_BEATS - 1) * this.rhythmMs + INPUT_WINDOW_MS;
       if (elapsed > lastWindowEnd) {
         this.rhythmEnded = true;
         this.endRhythmSequence();
@@ -1477,8 +1782,59 @@ export class MainScene extends Phaser.Scene {
   /*  Game flow                                                     */
   /* ============================================================ */
 
+  /**
+   * Wave 1 開始前に "READY" を 2 拍分表示してプレイヤーに準備の猶予を与える。
+   * READY が消えた瞬間に beginWave() へ移行するので最初の相手ターンは
+   * プレイヤーが画面を見てから始まる。
+   */
+  private showReadyThenBeginWave(): void {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    const readyText = this.add
+      .text(W / 2, H / 2, "READY", {
+        fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
+        fontSize: "80px",
+        color: "#ffcc00",
+        stroke: "#000000",
+        strokeThickness: 8,
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.gameOver)
+      .setAlpha(0)
+      .setScale(1.4);
+
+    this.tweens.add({
+      targets: readyText,
+      alpha: 1,
+      scale: 1,
+      duration: 320,
+      ease: "Back.easeOut",
+      onComplete: () => {
+        // 2 拍 (= 2 × rhythmMs) 表示してから消す
+        this.time.delayedCall(this.rhythmMs * 2, () => {
+          this.tweens.add({
+            targets: readyText,
+            alpha: 0,
+            y: H / 2 - 50,
+            duration: 380,
+            ease: "Sine.easeIn",
+            onComplete: () => {
+              readyText.destroy();
+              this.beginWave();
+            },
+          });
+        });
+      },
+    });
+  }
+
   private beginWave(): void {
     this.wave += 1;
+    if (isEndless(this.difficulty)) {
+      this.rhythmMs = beatMsForEndlessWave(this.wave);
+      this.resolveMs = this.rhythmMs;
+    }
     if (this.wave === 1) {
       // Anchor the run clock on the very first wave of the encounter.
       // `resetState()` already zeroes this, but reading `time.now` here
@@ -1487,6 +1843,18 @@ export class MainScene extends Phaser.Scene {
       this.runStartTime = this.time.now;
     }
     const rank = pickKaijuRank(this.wave);
+    if (rank === "boss" || rank === "giga") {
+      this.showBossGigaWarning(rank, () => this.continueBeginWave(rank));
+    } else {
+      this.continueBeginWave(rank);
+    }
+  }
+
+  /**
+   * Shared body of `beginWave` after optional WARNING overlay for boss/giga
+   * waves (called immediately for zako, or after the alert dismisses).
+   */
+  private continueBeginWave(rank: KaijuRank): void {
     this.applyKaijuRank(rank);
     this.rollWeatherForWave();
     this.refreshHUD();
@@ -1502,6 +1870,114 @@ export class MainScene extends Phaser.Scene {
         (maskedIdx.length > 0 ? ` (mask ${maskedIdx.join(",")})` : ""),
     );
     this.startRhythmSequence();
+  }
+
+  /**
+   * Shown the moment a boss or giga encounter begins — right after the
+   * previous wave is cleared, before the rhythm phase for the new rank.
+   * Click or auto-timeout dismisses; does not change game state.
+   */
+  private showBossGigaWarning(
+    rank: KaijuRank,
+    onComplete: () => void,
+  ): void {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    const isGiga = rank === "giga";
+    // Boss: WARNING / Giga: EMERGENCY — different headline vocabulary.
+    const head = isGiga ? "EMERGENCY" : "WARNING";
+    const sub1 = isGiga ? "GIGA" : "BOSS";
+    const sub2 = isGiga
+      ? "SEISMIC-CLASS  THREAT  DETECTED"
+      : "HEAVY-ARMOR  BATTLE  IMMINENT";
+    const headColor = isGiga ? "#ffeedd" : "#ffcc00";
+    const headStroke = isGiga ? "#4a0000" : "#1a0a00";
+
+    const dim = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0.58)
+      .setOrigin(0)
+      .setDepth(DEPTH.rankWarning);
+
+    const line1 = this.add
+      .text(W / 2, H * 0.38, head, {
+        fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
+        fontSize: isGiga ? "40px" : "38px",
+        color: headColor,
+        stroke: headStroke,
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.rankWarning)
+      .setAlpha(0);
+
+    const line2 = this.add
+      .text(W / 2, H * 0.48, sub1, {
+        fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
+        fontSize: "52px",
+        color: isGiga ? "#ff55aa" : "#ff5555",
+        stroke: "#200008",
+        strokeThickness: 8,
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.rankWarning)
+      .setAlpha(0)
+      .setScale(0.9);
+
+    const line3 = this.add
+      .text(W / 2, H * 0.6, sub2, {
+        fontFamily: FONT,
+        fontSize: "14px",
+        color: "#8b949e",
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.rankWarning)
+      .setAlpha(0);
+
+    this.tweens.add({
+      targets: [line1, line2, line3],
+      alpha: 1,
+      duration: 220,
+    });
+    this.tweens.add({
+      targets: line2,
+      scale: 1,
+      duration: 360,
+      ease: "Back.easeOut",
+    });
+
+    // Pulse the WARNING / EMERGENCY headline
+    this.tweens.add({
+      targets: line1,
+      alpha: { from: 0.85, to: 1 },
+      duration: 420,
+      yoyo: true,
+      repeat: 2,
+      ease: "Sine.easeInOut",
+    });
+
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      this.tweens.add({
+        targets: [line1, line2, line3, dim],
+        alpha: 0,
+        duration: 200,
+        onComplete: () => {
+          line1.destroy();
+          line2.destroy();
+          line3.destroy();
+          dim.destroy();
+          onComplete();
+        },
+      });
+    };
+
+    dim.setInteractive();
+    dim.once("pointerdown", finish);
+
+    this.time.delayedCall(2400, () => finish());
   }
 
   /**
@@ -1593,18 +2069,20 @@ export class MainScene extends Phaser.Scene {
     this.refreshBounceTargetScale(this.kaijuBody);
 
     this.kaijuLabel.setText(stats.label).setColor(stats.labelColor);
+    this.currentKaijuRank = rank;
   }
 
   /* ---- Rhythm phase (Foreshadow + Programming, 8 beats) ---- */
 
   /**
    * Kick off a fresh rhythm phase. `leadInMs` controls the gap before
-   * the first beat fires — RHYTHM_MS (default) gives the player a
-   * full 60-BPM beat of breathing room when a new kaiju appears, while
-   * a tighter value is used when looping back after a resolve phase
-   * against the same kaiju so the encounter flows without dead time.
+   * the first beat fires — `this.rhythmMs` (default) gives the player a
+   * full beat of breathing room when a new kaiju appears, while a tighter
+   * value is used when looping back after a resolve phase against the same
+   * kaiju so the encounter flows without dead time.
    */
-  private startRhythmSequence(leadInMs: number = RHYTHM_MS): void {
+  private startRhythmSequence(leadInMs?: number): void {
+    const lead = leadInMs ?? this.rhythmMs;
     this.phase = GamePhase.RHYTHM_KAIJU;
     this.setPhaseDisplay("\u266a READING", "#ffcc00");
     this.clearSlots();
@@ -1617,10 +2095,11 @@ export class MainScene extends Phaser.Scene {
     this.playerSeq = Array.from({ length: SEQ_LEN }, () => ActionType.IDLE);
     this.rhythmEnded = false;
 
-    this.rhythmStartTime = this.time.now + leadInMs;
+    this.rhythmStartTime = this.time.now + lead;
     this.lastProcessedBeat = -1;
 
     this.rhythmCursor.setPosition(this.kSlots[0].bg.x, this.kSlots[0].bg.y);
+    this.refreshSequencerStepHighlight(-1);
 
     console.log(
       "[Rhythm] KAIJU:",
@@ -1662,9 +2141,11 @@ export class MainScene extends Phaser.Scene {
 
       console.log(`[Rhythm] Slot ${pIdx} active`);
     }
+    this.refreshSequencerStepHighlight(beat);
   }
 
   private endRhythmSequence(): void {
+    this.refreshSequencerStepHighlight(-1);
     this.finalizeSlotInput(SEQ_LEN - 1);
     this.rhythmCursor.setVisible(false);
     this.timingBar.setVisible(false);
@@ -1709,18 +2190,20 @@ export class MainScene extends Phaser.Scene {
   }
 
   private moveCursorTo(slot: SlotUI): void {
+    // Expo.easeOut gives an instant "snap" that reads as the cursor
+    // locking onto the current beat with mechanical precision.
     this.tweens.add({
       targets: this.rhythmCursor,
       x: slot.bg.x,
       y: slot.bg.y,
-      duration: 200,
-      ease: "Sine.easeOut",
+      duration: 110,
+      ease: "Expo.easeOut",
     });
     this.tweens.add({
       targets: this.rhythmCursor,
-      scaleX: { from: 1.2, to: 1 },
-      scaleY: { from: 1.2, to: 1 },
-      duration: 250,
+      scaleX: { from: 1.3, to: 1 },
+      scaleY: { from: 1.3, to: 1 },
+      duration: 220,
       ease: "Back.easeOut",
     });
   }
@@ -1735,7 +2218,7 @@ export class MainScene extends Phaser.Scene {
     this.tweens.add({
       targets: this.timingBar,
       scaleX: 1,
-      duration: RHYTHM_MS,
+      duration: this.rhythmMs,
       ease: "Linear",
     });
   }
@@ -1762,12 +2245,12 @@ export class MainScene extends Phaser.Scene {
   /* ---- Input with timing window ---- */
 
   private getInputBeat(elapsed: number): number {
-    const beatFloat = elapsed / RHYTHM_MS;
+    const beatFloat = elapsed / this.rhythmMs;
     const nearestBeat = Math.round(beatFloat);
 
     if (nearestBeat < SEQ_LEN || nearestBeat >= TOTAL_BEATS) return -1;
 
-    const beatCentre = nearestBeat * RHYTHM_MS;
+    const beatCentre = nearestBeat * this.rhythmMs;
     const offset = Math.abs(elapsed - beatCentre);
     if (offset > INPUT_WINDOW_MS) return -1;
 
@@ -1785,7 +2268,7 @@ export class MainScene extends Phaser.Scene {
     this.playerSeq[pIdx] = action;
     audio.playClick({ pan: PAN_PLAYER });
 
-    const beatCentre = (pIdx + SEQ_LEN) * RHYTHM_MS;
+    const beatCentre = (pIdx + SEQ_LEN) * this.rhythmMs;
     const offset = Math.abs(elapsed - beatCentre);
     const quality =
       offset <= 50 ? "PERFECT" : offset <= 120 ? "GOOD" : "OK";
@@ -1876,7 +2359,7 @@ export class MainScene extends Phaser.Scene {
 
     let tick = 0;
     this.time.addEvent({
-      delay: RESOLVE_MS,
+      delay: this.resolveMs,
       repeat: RESOLVE_TOTAL_TICKS - 1,
       callback: () => {
         if (this.phase !== GamePhase.RESOLUTION) return;
@@ -2013,13 +2496,33 @@ export class MainScene extends Phaser.Scene {
       // Loop straight back into the next rhythm against the same kaiju
       // with only one 120-BPM beat of space so the pulse is unbroken.
       // The post-defeat pause lives in onWaveWin, not here.
-      this.startRhythmSequence(RESOLVE_MS);
+      this.startRhythmSequence(this.resolveMs);
     }
   }
 
   /* ============================================================ */
   /*  Combat                                                        */
   /* ============================================================ */
+
+  /**
+   * Removes HP from the current kaiju. For **BOSS** rank only, non–
+   * SPECIAL damage cannot take HP below 1 — the boss must be finished
+   * with a SPECIAL (必殺). GIGA / zako are unchanged.
+   *
+   * @param amount  Raw damage to apply
+   * @param fromSpecial  `true` when the source is a player SPECIAL
+   * @returns HP actually removed (for accurate floating combat text)
+   */
+  private damageKaiju(amount: number, fromSpecial: boolean): number {
+    if (this.currentKaijuRank !== "boss" || fromSpecial) {
+      this.kaijuHP -= amount;
+      return amount;
+    }
+    const canTake = Math.max(0, this.kaijuHP - 1);
+    const deal = Math.min(amount, canTake);
+    this.kaijuHP -= deal;
+    return deal;
+  }
 
   /**
    * Apply damage, Heat, VFX, and player-side / reaction audio for one
@@ -2047,10 +2550,13 @@ export class MainScene extends Phaser.Scene {
         audio.playAttack({ pan: PAN_PLAYER });
         if (kAct === ActionType.ATTACK) {
           const clashDmg = this.weatherAdjAtkDmg(DMG.clash);
-          this.kaijuHP -= clashDmg;
+          const dealtK = this.damageKaiju(clashDmg, false);
           this.playerHP -= clashDmg;
-          msg = `CLASH! Both -${clashDmg}`;
-          this.popText(kR, `-${clashDmg}`, VFX.pop.damage);
+          msg =
+            dealtK < clashDmg
+              ? `CLASH!  YOU -${clashDmg}  KAIJU -${dealtK}  (SPECIAL to finish BOSS)`
+              : `CLASH! Both -${clashDmg}`;
+          this.popText(kR, `-${dealtK}`, VFX.pop.damage);
           this.popText(pR, `-${clashDmg}`, VFX.pop.damage);
           this.emitSparks((kR.x + pR.x) / 2, kR.y, VFX.spark.hit);
           this.flash(kR, VFX.flash.kaijuHit);
@@ -2066,9 +2572,12 @@ export class MainScene extends Phaser.Scene {
           this.shake(30, 80);
         } else {
           const hitDmg = this.weatherAdjAtkDmg(DMG.attack);
-          this.kaijuHP -= hitDmg;
-          msg = `HIT! KAIJU -${hitDmg}`;
-          this.popText(kR, `-${hitDmg}`, VFX.pop.damage);
+          const dealtK = this.damageKaiju(hitDmg, false);
+          msg =
+            dealtK < hitDmg
+              ? `HIT! KAIJU -${dealtK}  (SPECIAL to finish BOSS)`
+              : `HIT! KAIJU -${hitDmg}`;
+          this.popText(kR, `-${dealtK}`, VFX.pop.damage);
           this.emitSparks(kR.x, kR.y, VFX.spark.hit);
           this.flash(kR, VFX.flash.kaijuHit);
           this.shake(60, 140);
@@ -2116,13 +2625,15 @@ export class MainScene extends Phaser.Scene {
         const hitStopMs =
           kAct === ActionType.GUARD ? HITSTOP_MS.break : HITSTOP_MS.special;
         if (kAct === ActionType.GUARD) {
-          this.kaijuHP -= DMG.specialVsGuard;
-          msg = `BREAK! KAIJU -${DMG.specialVsGuard}`;
-          this.popText(kR, `-${DMG.specialVsGuard}`, VFX.pop.special);
+          const vsG = DMG.specialVsGuard;
+          const dealtK = this.damageKaiju(vsG, true);
+          msg = `BREAK! KAIJU -${dealtK}`;
+          this.popText(kR, `-${dealtK}`, VFX.pop.special);
         } else {
-          this.kaijuHP -= DMG.special;
-          msg = `SPECIAL! KAIJU -${DMG.special}`;
-          this.popText(kR, `-${DMG.special}`, VFX.pop.special);
+          const sp = DMG.special;
+          const dealtK = this.damageKaiju(sp, true);
+          msg = `SPECIAL! KAIJU -${dealtK}`;
+          this.popText(kR, `-${dealtK}`, VFX.pop.special);
         }
         this.emitSparks(kR.x, kR.y, VFX.spark.special);
         this.flash(kR, VFX.flash.kaijuSpecial);
@@ -2304,13 +2815,7 @@ export class MainScene extends Phaser.Scene {
    * clearing; ENDLESS just shows the raw count since there is no cap.
    */
   private refreshProgressHUD(): void {
-    const cap = this.maxWave;
-    if (cap === Infinity) {
-      this.scoreLabel.setText(`WAVE ${Math.max(1, this.wave)}`);
-    } else {
-      const shown = Math.min(Math.max(1, this.wave), cap);
-      this.scoreLabel.setText(`WAVE ${shown}/${cap}`);
-    }
+    this.layoutScoreHud();
   }
 
   private refreshHUD(): void {
@@ -2325,20 +2830,19 @@ export class MainScene extends Phaser.Scene {
     this.playerHPText.setText(`HP ${ph}`);
     this.playerHPBar.displayWidth = this.barMaxW * (ph / HP_INIT.player);
 
-    this.playerHeatText.setText(`HEAT ${ht}`);
+    // Heat gauge: three-stage colour ramp for immediate danger reading.
+    //   0–50  → Cyan   (safe / normal operation)
+    //   51–79 → Yellow (caution / heating up)
+    //   80+   → Red    (danger zone — shake tween also kicks in)
     this.playerHeatBar.displayWidth =
       this.barMaxW * Math.min(1, ht / OVERHEAT_THRESHOLD);
 
-    if (ht >= OVERHEAT_THRESHOLD) {
-      this.playerHeatBar.setFillStyle(PAL.heatRed);
-      this.playerHeatText.setColor("#ff0000");
-    } else if (ht >= HEAT_DANGER) {
-      this.playerHeatBar.setFillStyle(0xff4400);
-      this.playerHeatText.setColor("#ff4400");
-    } else {
-      this.playerHeatBar.setFillStyle(PAL.heatOrange);
-      this.playerHeatText.setColor("#ff6600");
-    }
+    const heatColor =
+      ht >= HEAT_DANGER ? 0xff0000 : ht > 50 ? 0xffff00 : 0x00ffff;
+    const heatHex =
+      ht >= HEAT_DANGER ? "#ff0000" : ht > 50 ? "#ffff00" : "#00ffff";
+    this.playerHeatBar.setFillStyle(heatColor);
+    this.playerHeatText.setColor(heatHex);
 
     this.updateHeatDangerUI(ht);
   }
@@ -2369,8 +2873,10 @@ export class MainScene extends Phaser.Scene {
     this.heatDangerActive = nowDanger;
     if (nowDanger) {
       this.activateHeatAlert();
+      this.startHeatGaugeShake();
     } else {
       this.clearHeatAlert();
+      this.stopHeatGaugeShake();
       this.playHeatReliefFlash();
     }
   }
@@ -2454,28 +2960,25 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   /**
-   * Freeze-frame for "big impact" events: pause the scene's Time.Clock
-   * (next resolveStep and delayedCalls) and all active tweens, then
-   * resume after `duration` ms via an out-of-band window.setTimeout
-   * (Phaser timers would be paused by the very flag we just set).
+   * Freeze-frame for "big impact" events: only tweens are paused.
+   * We intentionally do **not** set `this.time.paused` — pausing the
+   * global Time.Clock also freezes the `time.addEvent` that drives
+   * resolve ticks, so every hit-stop (CLASH, etc.) shoves the next
+   * `pulseBeat` late and the combat rhythm desyncs from the metronome.
    *
-   * Camera shake intentionally keeps running — its `preRender` uses
-   * frame delta, so the screen rattles on the frozen frame which is
-   * the classic fighting-game hit-stop feel.
+   * Camera shake keeps running; hit-stop is visual/tween-only.
    */
   private applyHitStop(duration: number): void {
     if (this.hitStopActive) return;
     if (this.phase !== GamePhase.RESOLUTION) return;
 
     this.hitStopActive = true;
-    this.time.paused = true;
     this.tweens.pauseAll();
 
     this.hitStopResumeHandle = window.setTimeout(() => {
       this.hitStopResumeHandle = null;
       // The scene may have been shut down or restarted while frozen.
       if (!this.scene.isActive()) return;
-      this.time.paused = false;
       this.tweens.resumeAll();
       this.hitStopActive = false;
     }, duration);
@@ -2487,7 +2990,6 @@ export class MainScene extends Phaser.Scene {
       this.hitStopResumeHandle = null;
     }
     if (this.hitStopActive) {
-      this.time.paused = false;
       this.tweens.resumeAll();
       this.hitStopActive = false;
     }
@@ -2507,11 +3009,112 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
-  /** Remove the red vignette and stop its pulse. */
+  /** Remove the red vignette, stop its pulse, and end any gauge shake. */
   private clearHeatAlert(): void {
     this.heatAlertTween?.stop();
     this.heatAlertTween = undefined;
     this.heatVignette.setVisible(false).setAlpha(0);
+    this.stopHeatGaugeShake();
+  }
+
+  // ================================================================
+  //  Heat gauge shake
+  // ================================================================
+
+  /**
+   * Start a looping left–right oscillation on the heat gauge container.
+   * Called when heat crosses into the danger zone (≥ HEAT_DANGER).
+   * Idempotent — second calls while already shaking are no-ops.
+   */
+  private startHeatGaugeShake(): void {
+    if (this.heatShakeTween) return;
+    this.heatShakeTween = this.tweens.add({
+      targets: this.heatGaugeContainer,
+      x: { from: this.heatGaugeRestX - 2, to: this.heatGaugeRestX + 2 },
+      duration: 65,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
+  }
+
+  /**
+   * Stop the gauge shake and snap the container back to its rest position.
+   * Safe to call even when no shake is active.
+   */
+  private stopHeatGaugeShake(): void {
+    if (!this.heatShakeTween) return;
+    this.heatShakeTween.stop();
+    this.heatShakeTween = undefined;
+    if (this.heatGaugeContainer?.active) {
+      this.heatGaugeContainer.setPosition(
+        this.heatGaugeRestX,
+        this.heatGaugeRestY,
+      );
+    }
+  }
+
+  // ================================================================
+  //  Cockpit chrome (divider + frame)
+  // ================================================================
+
+  /**
+   * Decorative divider between the combat area (top) and the control
+   * deck (bottom). The division line at H * 0.515 is purely visual —
+   * no game logic reads from it.
+   */
+  private buildCockpitChrome(W: number, H: number): void {
+    const divY = H * 0.515;
+    const g = this.add.graphics().setDepth(DEPTH.heatVignette - 5);
+
+    // Main rule
+    g.lineStyle(1, 0x1e3050, 0.85);
+    g.lineBetween(W * 0.04, divY, W * 0.96, divY);
+
+    // Corner accent marks
+    g.fillStyle(0x1e3050, 0.7);
+    g.fillRect(W * 0.04, divY - 1, 18, 3);
+    g.fillRect(W * 0.96 - 18, divY - 1, 18, 3);
+    g.fillRect(W * 0.04, divY - 1, 3, 6);
+    g.fillRect(W * 0.96 - 3, divY - 1, 3, 6);
+  }
+
+  // ================================================================
+  //  Monitor overlay (vignette + scanlines) — topmost visual layer
+  // ================================================================
+
+  /**
+   * Draws a permanent CRT-monitor illusion on top of all gameplay UI.
+   * Uses Phaser.GameObjects.Graphics with fillGradientStyle for the
+   * vignette and repeated 1-px rectangles for the scanline pattern.
+   *
+   * Depth 95 sits above the heat vignette (90) but below the
+   * game-over overlay (100) so the GO screen always reads clearly.
+   */
+  private buildMonitorOverlay(W: number, H: number): void {
+    const g = this.add.graphics().setDepth(95);
+
+    // ---- Vignette (dark edges, bright centre) ----
+    // Top fade: opaque at top, transparent at 40 % down.
+    g.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0.5, 0.5, 0, 0);
+    g.fillRect(0, 0, W, H * 0.4);
+    // Bottom fade
+    g.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0, 0, 0.5, 0.5);
+    g.fillRect(0, H * 0.6, W, H * 0.4);
+    // Left fade
+    g.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0.4, 0, 0.4, 0);
+    g.fillRect(0, 0, W * 0.16, H);
+    // Right fade
+    g.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0, 0.4, 0, 0.4);
+    g.fillRect(W * 0.84, 0, W * 0.16, H);
+
+    // ---- Scanlines ----
+    // Very thin horizontal lines every 4 px at alpha 0.05 — barely
+    // visible but add texture that reads as a CRT screen up close.
+    g.fillStyle(0x000000, 0.05);
+    for (let y = 0; y < H; y += 4) {
+      g.fillRect(0, y, W, 1);
+    }
   }
 
   /**
@@ -2658,5 +3261,6 @@ export class MainScene extends Phaser.Scene {
   private onResize(size: Phaser.Structs.Size): void {
     this.cameras.main.setViewport(0, 0, size.width, size.height);
     this.heatVignette?.setSize(size.width, size.height);
+    this.layoutScoreHud();
   }
 }
