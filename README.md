@@ -21,7 +21,7 @@ Pacific Rhythm is a **rhythm-driven mech-vs-kaiju** duel. Every encounter is a f
 
 Built with **Phaser 3 shapes and text**, a pair of bespoke Midjourney flat-vector illustrations, and a fully **procedural audio engine** on the Web Audio API (no sample files ship with the build).
 
-- **Rhythm-based combat** — all input is beat-gated with a ±200 ms window; **PERFECT** (≤100 ms from beat centre) trims Heat by 5 and triggers extra juice
+- **Rhythm-based combat** — each press is mapped to the closest **scheduled** player beat in a ±200 ms window; **PERFECT** (≤100 ms) trims Heat by 5 and triggers extra juice
 - **Three difficulty tiers** — EASY (**9 waves / 9 kaiju**, no weather), NORMAL (**15 waves**, weather on), ENDLESS (unlimited, **tempo ramps +2 BPM per phase** after phase 0)
 - **Procedural audio** — every SFX, beat, and hiss is synthesised at runtime from oscillators + a shared noise buffer
 - **Fully responsive** — `Phaser.Scale.FIT` on a 960×540 canvas; runs identically on desktop, mobile, YouTube Playables, and Wavedash iframes
@@ -63,7 +63,7 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 ### Open Source by GitHub
 
 - **MIT licensed** (see `LICENSE`) — permissive for forks, remixes, and educational use.
-- **Clean TypeScript architecture** — strict mode, explicit types at every public surface, config and runtime logic separated. [`src/config/difficulty.ts`](src/config/difficulty.ts), [`enemies.ts`](src/config/enemies.ts), [`weather.ts`](src/config/weather.ts), and [`rhythmAndEmergency.ts`](src/config/rhythmAndEmergency.ts) hold tunables and pure helpers (rhythm quality windows, emergency HP, SPECIAL heat in crisis, etc.) so balance passes rarely need to touch `MainScene` line-by-line.
+- **Clean TypeScript architecture** — strict mode, explicit types at every public surface, config and runtime logic separated. [`src/config/difficulty.ts`](src/config/difficulty.ts), [`enemies.ts`](src/config/enemies.ts), [`weather.ts`](src/config/weather.ts), and [`rhythmAndEmergency.ts`](src/config/rhythmAndEmergency.ts) hold tunables and pure helpers. Rhythm input uses **`resolvePlayerRhythmInput()`** so the **same** scheduled-beat-centre path picks the slot, checks the ±200 ms window, and supplies **|offset|** for `PERFECT` / `GOOD` — no split between “nearest beat” math and `time.now` classification. Heavier visuals (`EmergencyModeOverlay`, `PlayerRhythmInputVfx`) live under [`src/game/`](src/game/) so `MainScene` stays a coordinator.
 - **Readable commit history** — every feature arrived as a single-purpose commit with a narrative message, making the repo double as a "how we built it" walkthrough.
 
 ---
@@ -100,7 +100,7 @@ The game does not save local high scores or best times; each run is self-contain
 
 ### Input timing
 
-Each player beat (programming phase, slots 0–3) has a **±200 ms** input window. Press within the window to register your action; miss it and the slot becomes **MISS** / IDLE. Within the window, **|now − beat centre| ≤ 100 ms** counts as **PERFECT** (instant **−5 Heat**, gold VFX, layered `playSpecial` cue); wider hits in-window are **GOOD** (lighter VFX, no extra Heat). Values live in [`src/config/rhythmAndEmergency.ts`](src/config/rhythmAndEmergency.ts).
+For each press in the programming phase, the game runs **`resolvePlayerRhythmInput()`** from [`src/config/rhythmAndEmergency.ts`](src/config/rhythmAndEmergency.ts): for every player slot 0–3 it compares **elapsed** (`now − rhythmStartTime`) to that slot’s **scheduled** beat centre (beats 4–7 of the turn, i.e. `(pIdx + 4) × rhythmMs` from the start). The slot with the **smallest** **|offset|** inside the **±200 ms** window wins; if two offsets tie, the **lower** slot index wins. Miss every window and the input is ignored (slot stays **IDLE**). **`classifyRhythmInputOffset()`** then maps the same **|offset|** to **PERFECT** (≤ 100 ms) or **GOOD** — instant **−5 Heat** and gold juice only on **PERFECT**. Constants: `RHYTHM.INPUT_WINDOW_MS`, `RHYTHM.PERFECT_OFFSET_MS`.
 
 ### Controls
 
@@ -191,6 +191,7 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER
 ### Rhythm timing
 
 - Beat-count based: `update()` derives the current beat from `(now - startTime) / beatLength`, independent of frame rate; `beatLength` is `rhythmMs` (and resolution uses `resolveMs`, kept equal to `rhythmMs` in the current build).
+- **Player input** does not use a separate `Math.round(beatFloat)` path: `onActionClick` calls `resolvePlayerRhythmInput` so window membership and **PERFECT** / **GOOD** both use the **same** offset from the **intended** centre of the closest valid slot.
 - One-beat lead-in before the first beat fires
 - Buttons are enabled ±200 ms before the first player beat (early input support)
 
@@ -244,11 +245,13 @@ Rock-paper-scissors style resolution with Heat management. Each step is split ov
 
 ### VFX
 
+- **Rhythm programming (PERFECT / GOOD)**: rings, “PERFECT!!” / “GOOD” copy, sparks, and paired SFX live in [`src/game/PlayerRhythmInputVfx.ts`](src/game/PlayerRhythmInputVfx.ts); `MainScene` only passes timing + slot centre coordinates.
 - **Damage popups**: Floating text that drifts up and fades (red for damage, blue for COOL, purple for SPECIAL)
 - **Camera shake**: Intensity and duration scale with damage (light for blocks, heavy for SPECIAL)
 - **Hit sparks**: Particle burst of coloured rectangles at point of impact
 - **Beat bounce**: Characters, labels, and buttons pulse by +5 % every beat, relative to each object's rest scale (Image sprites keep their `setDisplaySize` scaling intact across the pulse)
 - **Body flash**: Both combatant sprites flash via `setTint` and snap back after 120 ms from a single `flash()` helper
+- **Emergency mode (HP ≤ 30)**: full-screen radial vignette, red multiply layer, and banner are owned by [`src/game/EmergencyModeOverlay.ts`](src/game/EmergencyModeOverlay.ts) (`enter` / `exit` / `relayout` on resize).
 
 ### Audio
 
@@ -279,7 +282,7 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
   - `SPECIAL` (regular hit): **180 ms**
   - `VULNERABLE` (COOL vs ATTACK): **160 ms**
 - **Heat gauge** — the bar uses a three-stage colour ramp; the label shows **current Heat / 100** so exact numbers are always visible.
-- **Heat danger vignette**: When Heat ≥ `HEAT_DANGER` (80), a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk. **Emergency** (HP ≤ 30) uses a **separate** full-screen crisis layer; both can be visible at once.
+- **Heat danger vignette**: When Heat ≥ `HEAT_DANGER` (80), a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk. **Emergency** (HP ≤ 30) uses a **separate** crisis layer implemented by `EmergencyModeOverlay`; both can be visible at once.
 - **Relief flash + steam vent**: The instant a successful `COOL` pulls Heat back below 80, the vignette is cleared, `Camera.flash` bursts a blue-white `(136, 204, 255)` tint, and an **upward cone of light-blue additive particles** vents out of the player mech (30 particles, 240°–300° arc, `gravityY -120`, 720 ms lifespan). The "I made it!" release is now audible, visible, _and_ feels like real steam escaping.
 - **Praise pops**: The two most satisfying combat moments trigger a giant centre-screen gold callout that scales up with `Back.easeOut` overshoot and drifts upward as it fades:
   - `SPECIAL` vs `GUARD` (non-fatal) → **CRITICAL!!**
@@ -292,7 +295,7 @@ Built for embedded hosts (YouTube Playables, Wavedash, plain web) where the view
 - **Design resolution**: fixed landscape **960 × 540 (16:9)**. Gameplay code reads `this.scale.width / height`, which under FIT mode always equals the design size — layout math is therefore deterministic on every target.
 - **Scale mode**: `Phaser.Scale.FIT` + `Phaser.Scale.CENTER_BOTH`. The Scale Manager uniformly scales the canvas to fit the parent container while preserving the 16:9 aspect; the canvas is always centred inside any remaining letterbox bars.
 - **CSS hygiene** (`index.html`): `html, body` use `margin: 0; overflow: hidden`, the `#app` parent fills the viewport with `safe-area-inset-*` padding for notched devices, and the injected `canvas` is `display: block` with `max-width / max-height: 100 %` to prevent inline-baseline whitespace or overflow.
-- **Resize hook**: `MainScene` subscribes to `this.scale.on("resize", onResize)` at `create()` and unsubscribes on `SHUTDOWN`. Under FIT the reported size is constant, so the handler is a no-op scaffold today — kept as an extension point for future orientation-specific layouts or a mode swap.
+- **Resize hook**: `MainScene` subscribes to `this.scale.on("resize", onResize)` at `create()` and unsubscribes on `SHUTDOWN`. The handler relayouts HUD chrome, the heat danger vignette, and **`EmergencyModeOverlay.relayout()`** when emergency mode is active. Under current FIT settings the logical size is usually stable, but the path is ready for `Scale.RESIZE` or host iframe changes.
 
 ---
 
@@ -305,14 +308,17 @@ src/
     BootScene.ts         # Scale refresh → Preloader
     PreloaderScene.ts    # Loads images (mech sprite, kaiju ranks) → Title
     TitleScene.ts        # Mech-OS title, boot log, difficulty pills, ENGAGE → MainScene
-    MainScene.ts         # Core game: rhythm sequencer, combat, VFX, game feel
+    MainScene.ts         # Core game: rhythm sequencer, combat, coordination, game feel
+  game/
+    EmergencyModeOverlay.ts  # Low-HP full-screen crisis layer (vignette, flash, banner)
+    PlayerRhythmInputVfx.ts    # Programming-phase PERFECT/GOOD rings, text, sparks, SFX
   audio/
     AudioManager.ts      # Procedural Web Audio SFX (heartbeat, impacts, hiss…)
   config/
     difficulty.ts        # Difficulty configs, optional `maxWaves`, `phaseIndexForWave`, ENDLESS tempo
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
-    rhythmAndEmergency.ts # Input PERFECT/GOOD windows, emergency HP, SPECIAL heat in crisis, beat SFX pitch
+    rhythmAndEmergency.ts # `resolvePlayerRhythmInput`, PERFECT/GOOD, emergency HP, SPECIAL heat, beat SFX pitch
   web3/
     WalletManager.ts     # EIP-1193 connect + personal_sign score attestation
     types.ts             # Shared EthereumProvider + Window.ethereum augmentation

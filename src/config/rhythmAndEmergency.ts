@@ -48,7 +48,55 @@ export const PULSE = {
 } as const;
 
 /**
- * After `getInputBeat` has accepted a slot, map centre offset to PERFECT/GOOD.
+ * Result of `resolvePlayerRhythmInput`: a single, consistent mapping from
+ * wall-clock to the *closest* valid player-beat window (pIdx 0–3).
+ */
+export interface PlayerRhythmWindowHit {
+  pIdx: number;
+  /** |elapsed − (pIdx + seqLen) * rhythmMs| with elapsed = now − start. */
+  absOffsetMs: number;
+  /** `rhythmStartTime + (pIdx + seqLen) * rhythmMs` for logging / VFX. */
+  beatCenterTime: number;
+}
+
+/**
+ * Picks the player slot (0..seqLen−1) whose **scheduled** beat centre is
+ * closest in time, subject to the input window. This replaces a separate
+ * `getInputBeat` (nearest global beat) + `|now - centre(tied pIdx)|` path so
+ * edge cases cannot disagree.
+ *
+ * Among candidates inside the window, the **minimum** |offset| wins; ties go
+ * to the **lower** pIdx.
+ */
+export function resolvePlayerRhythmInput(
+  nowMs: number,
+  rhythmStartTime: number,
+  rhythmMs: number,
+  seqLen: number,
+  inputWindowMs: number,
+): PlayerRhythmWindowHit | null {
+  if (rhythmMs < 1) return null;
+  const elapsed = nowMs - rhythmStartTime;
+  let best: PlayerRhythmWindowHit | null = null;
+  for (let pIdx = 0; pIdx < seqLen; pIdx++) {
+    const centreElapsed = (pIdx + seqLen) * rhythmMs;
+    const abs = Math.abs(elapsed - centreElapsed);
+    if (abs > inputWindowMs) continue;
+    if (
+      !best ||
+      abs < best.absOffsetMs ||
+      (abs === best.absOffsetMs && pIdx < best.pIdx)
+    ) {
+      const beatCenterTime = rhythmStartTime + centreElapsed;
+      best = { pIdx, absOffsetMs: abs, beatCenterTime };
+    }
+  }
+  return best;
+}
+
+/**
+ * Maps a centre offset to PERFECT/GOOD (use `resolvePlayerRhythmInput`
+ * `absOffsetMs` for both window membership and this classification).
  */
 export function classifyRhythmInputOffset(
   absOffsetFromCentreMs: number,
@@ -60,8 +108,6 @@ export function classifyRhythmInputOffset(
 
 /**
  * Wall-clock instant of the centre of the player slot beat `pIdx` (0–3).
- * Equivalently: next beat "trigger" in ms since `time.now` reference not used;
- * compare with `scene.time.now` for offset.
  */
 export function playerSlotBeatCenterTime(
   rhythmStartTime: number,

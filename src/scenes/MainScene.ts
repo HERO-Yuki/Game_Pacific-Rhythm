@@ -15,8 +15,10 @@ import {
   PULSE,
   RHYTHM,
   type RhythmInputTiming,
-  playerSlotBeatCenterTime,
+  resolvePlayerRhythmInput,
 } from "../config/rhythmAndEmergency";
+import { EmergencyModeOverlay } from "../game/EmergencyModeOverlay";
+import { PlayerRhythmInputVfx } from "../game/PlayerRhythmInputVfx";
 import { KAIJU_STATS, pickKaijuRank, type KaijuRank } from "../config/enemies";
 import {
   adjustAttackDmg,
@@ -509,12 +511,10 @@ export class MainScene extends Phaser.Scene {
     null,
     null,
   ];
-  /** At or below 30 HP: strong vignette, banner, + lower SPECIAL heat gain. */
-  private emergencyMode = false;
-  private emergencyVigImage: Phaser.GameObjects.Image | null = null;
-  private emergencyRedFlash: Phaser.GameObjects.Rectangle | null = null;
-  private emergencyLabel: Phaser.GameObjects.Text | null = null;
-  private emergencyRedTimer?: Phaser.Time.TimerEvent;
+  /** Full-screen low-HP layer; `isEmergencyMode` reflects its active state. */
+  private emergencyOverlay: EmergencyModeOverlay | null = null;
+  /** PERFECT/GOOD rings and sparks, extracted for clarity and future tests. */
+  private rhythmInputVfx!: PlayerRhythmInputVfx;
   private beatPulseIndex = 0;
   private btns: BtnUI[] = [];
   /**
@@ -648,6 +648,11 @@ export class MainScene extends Phaser.Scene {
     }
 
     this.buildUI();
+    this.rhythmInputVfx = new PlayerRhythmInputVfx(this, {
+      rhythmInputBack: DEPTH.rhythmInputBack,
+      rhythmInputPraise: DEPTH.rhythmInputPraise,
+      sparks: DEPTH.sparks,
+    });
     this.cacheBounceTargets();
     this.refreshHUD();
     this.setupKeyboardInput();
@@ -721,6 +726,10 @@ export class MainScene extends Phaser.Scene {
       this.phase === GamePhase.GAME_OVER ||
       this.phase === GamePhase.GAME_CLEAR
     );
+  }
+
+  private get isEmergencyMode(): boolean {
+    return this.emergencyOverlay?.isActive() === true;
   }
 
   /**
@@ -2516,29 +2525,21 @@ export class MainScene extends Phaser.Scene {
 
   /* ---- Input with timing window ---- */
 
-  private getInputBeat(elapsed: number): number {
-    const beatFloat = elapsed / this.rhythmMs;
-    const nearestBeat = Math.round(beatFloat);
-
-    if (nearestBeat < SEQ_LEN || nearestBeat >= TOTAL_BEATS) return -1;
-
-    const beatCentre = nearestBeat * this.rhythmMs;
-    const offset = Math.abs(elapsed - beatCentre);
-    if (offset > RHYTHM.INPUT_WINDOW_MS) return -1;
-
-    return nearestBeat - SEQ_LEN;
-  }
-
   private onActionClick(action: ActionType): void {
     if (!this.isRhythmPhase()) return;
 
-    const elapsed = this.time.now - this.rhythmStartTime;
-    const pIdx = this.getInputBeat(elapsed);
-    if (pIdx < 0) return;
+    const now = this.time.now;
+    const resolved = resolvePlayerRhythmInput(
+      now,
+      this.rhythmStartTime,
+      this.rhythmMs,
+      SEQ_LEN,
+      RHYTHM.INPUT_WINDOW_MS,
+    );
+    if (!resolved) return;
+    const { pIdx, absOffsetMs: offset, beatCenterTime } = resolved;
     if (this.playerSeq[pIdx] !== ActionType.IDLE) return;
 
-    const beatCenterTime = this.getPlayerSlotBeatCenterTime(pIdx);
-    const offset = Math.abs(this.time.now - beatCenterTime);
     const timing = classifyRhythmInputOffset(offset);
 
     this.playerSeq[pIdx] = action;
@@ -2555,7 +2556,7 @@ export class MainScene extends Phaser.Scene {
     }
 
     console.log(
-      `[Rhythm] Slot ${pIdx}: ${action} (${timing}, ${offset.toFixed(0)}ms)`,
+      `[Rhythm] Slot ${pIdx}: ${action} (${timing}, ${offset.toFixed(0)}ms, centre=${beatCenterTime.toFixed(0)})`,
     );
   }
 
@@ -2603,7 +2604,7 @@ export class MainScene extends Phaser.Scene {
 
   private pulseBeat(): void {
     this.beatPulseIndex++;
-    const em = this.emergencyMode;
+    const em = this.isEmergencyMode;
     audio.playBeat({
       pitchMul: em ? PULSE.EMERGENCY_BEAT_PITCH_MUL : 1,
     });
@@ -3183,160 +3184,38 @@ export class MainScene extends Phaser.Scene {
       this.endEmergencyMode();
       return;
     }
-    if (!this.emergencyMode && ph <= EMERGENCY.HP_THRESHOLD) {
+    if (!this.isEmergencyMode && ph <= EMERGENCY.HP_THRESHOLD) {
       this.startEmergencyMode();
-    } else if (this.emergencyMode && ph > EMERGENCY.HP_THRESHOLD) {
+    } else if (this.isEmergencyMode && ph > EMERGENCY.HP_THRESHOLD) {
       this.endEmergencyMode();
     }
   }
 
   private startEmergencyMode(): void {
-    if (this.emergencyMode) return;
+    if (this.isEmergencyMode) return;
     const W = this.scale.width;
     const H = this.scale.height;
-    this.rebuildEmergencyVignetteTexture(W, H);
-    if (!this.textures.exists(EMERGENCY.VIGNETTE_TEXTURE_KEY)) return;
-    this.emergencyMode = true;
-    this.emergencyVigImage = this.add
-      .image(0, 0, EMERGENCY.VIGNETTE_TEXTURE_KEY)
-      .setOrigin(0, 0)
-      .setDisplaySize(W, H)
-      .setScrollFactor(0)
-      .setDepth(DEPTH.emergencyVig)
-      .setAlpha(0.72);
-    this.emergencyRedFlash = this.add
-      .rectangle(0, 0, W, H, 0xff1a0a, 0.08)
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(DEPTH.emergencyRed)
-      .setBlendMode(Phaser.BlendModes.MULTIPLY);
-    this.emergencyLabel = this.add
-      .text(
-        W / 2,
-        H * EMERGENCY.BANNER_Y_RATIO,
-        EMERGENCY.BANNER_TEXT,
-        {
-          fontFamily:
-            "ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace",
-          fontSize: "16px",
-          color: "#ff6666",
-          stroke: "#000000",
-          strokeThickness: 6,
-          align: "center",
-          wordWrap: { width: W * 0.95, useAdvancedWrap: true },
-        },
-      )
-      .setOrigin(0.5, 0)
-      .setScrollFactor(0)
-      .setDepth(DEPTH.emergencyText);
-    this.reapplyEmergencyVignettePulseTweens(this.emergencyVigImage);
-    this.emergencyRedTimer = this.time.addEvent({
-      delay: EMERGENCY.RED_GLITCH.intervalMs,
-      loop: true,
-      callback: () => {
-        if (!this.emergencyRedFlash?.active) return;
-        this.emergencyRedFlash.setAlpha(
-          Phaser.Math.FloatBetween(
-            EMERGENCY.RED_GLITCH.alpha.min,
-            EMERGENCY.RED_GLITCH.alpha.max,
-          ),
-        );
-      },
+    const o = new EmergencyModeOverlay(this, {
+      emergencyRed: DEPTH.emergencyRed,
+      emergencyVig: DEPTH.emergencyVig,
+      emergencyText: DEPTH.emergencyText,
     });
+    if (!o.enter(W, H)) return;
+    this.emergencyOverlay = o;
   }
 
   private endEmergencyMode(): void {
-    this.emergencyRedTimer?.remove(false);
-    this.emergencyRedTimer = undefined;
-    if (this.emergencyVigImage) {
-      this.tweens.killTweensOf(this.emergencyVigImage);
-    }
-    if (this.emergencyRedFlash) {
-      this.tweens.killTweensOf(this.emergencyRedFlash);
-    }
-    this.emergencyVigImage?.destroy();
-    this.emergencyVigImage = null;
-    this.emergencyRedFlash?.destroy();
-    this.emergencyRedFlash = null;
-    this.emergencyLabel?.destroy();
-    this.emergencyLabel = null;
-    if (this.textures.exists(EMERGENCY.VIGNETTE_TEXTURE_KEY)) {
-      this.textures.remove(EMERGENCY.VIGNETTE_TEXTURE_KEY);
-    }
-    this.emergencyMode = false;
+    this.emergencyOverlay?.exit();
+    this.emergencyOverlay = null;
   }
 
   /** Recreate the emergency canvas + UI when the logical game size changes. */
   private syncEmergencyLayout(W: number, H: number): void {
-    if (!this.emergencyMode) return;
-    this.rebuildEmergencyVignetteTexture(W, H);
-    if (
-      this.emergencyVigImage &&
-      this.textures.exists(EMERGENCY.VIGNETTE_TEXTURE_KEY)
-    ) {
-      this.emergencyVigImage.setTexture(EMERGENCY.VIGNETTE_TEXTURE_KEY);
-      this.emergencyVigImage.setDisplaySize(W, H);
-      this.tweens.killTweensOf(this.emergencyVigImage);
-      this.emergencyVigImage.setAlpha(0.72);
-      this.reapplyEmergencyVignettePulseTweens(this.emergencyVigImage);
-    }
-    this.emergencyRedFlash?.setSize(W, H);
-    this.emergencyLabel?.setPosition(W / 2, H * EMERGENCY.BANNER_Y_RATIO);
-    this.emergencyLabel?.setStyle({
-      wordWrap: { width: W * 0.95, useAdvancedWrap: true },
-    });
-  }
-
-  private reapplyEmergencyVignettePulseTweens(
-    target: Phaser.GameObjects.Image,
-  ): void {
-    const p = EMERGENCY.VIG_PULSE;
-    this.tweens.add({
-      targets: target,
-      alpha: { from: p.alpha.from, to: p.alpha.to },
-      duration: p.duration,
-      ease: "Sine.easeInOut",
-      yoyo: true,
-      repeat: -1,
-    });
-  }
-
-  private rebuildEmergencyVignetteTexture(W: number, H: number): void {
-    if (this.textures.exists(EMERGENCY.VIGNETTE_TEXTURE_KEY)) {
-      this.textures.remove(EMERGENCY.VIGNETTE_TEXTURE_KEY);
-    }
-    const tex = this.textures.createCanvas(
-      EMERGENCY.VIGNETTE_TEXTURE_KEY,
-      Math.ceil(W),
-      Math.ceil(H),
-    );
-    if (!tex) return;
-    const ctx = tex.getContext();
-    if (!ctx) return;
-    const cx = W / 2;
-    const cy = H / 2;
-    const r = Math.max(W, H) * 0.72;
-    const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-    grd.addColorStop(0, "rgba(210, 40, 30, 0.32)");
-    grd.addColorStop(0.45, "rgba(32, 0, 0, 0.58)");
-    grd.addColorStop(1, "rgba(0, 0, 0, 0.95)");
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, W, H);
-    tex.refresh();
-  }
-
-  /** Scheduled wall-clock instant for the centre of the player slot beat. */
-  private getPlayerSlotBeatCenterTime(pIdx: number): number {
-    return playerSlotBeatCenterTime(
-      this.rhythmStartTime,
-      pIdx,
-      this.rhythmMs,
-      SEQ_LEN,
-    );
+    this.emergencyOverlay?.relayout(W, H);
   }
 
   private specialHeatDeltaBase(): number {
-    return this.emergencyMode ? EMERGENCY.HEAT_SPECIAL : HEAT_DELTA.special;
+    return this.isEmergencyMode ? EMERGENCY.HEAT_SPECIAL : HEAT_DELTA.special;
   }
 
   private spawnRhythmTimingFeedback(
@@ -3345,116 +3224,12 @@ export class MainScene extends Phaser.Scene {
   ): void {
     const s = this.pSlots[pIdx];
     if (!s?.bg) return;
-    const x = s.bg.x;
-    const y = s.bg.y;
-    if (timing === "PERFECT") {
-      this.spawnPerfectRhythmFeedback(x, y);
-    } else {
-      this.spawnGoodRhythmFeedback(x, y);
-    }
-  }
-
-  private spawnPerfectRhythmFeedback(x: number, y: number): void {
-    const ring = this.add
-      .circle(x, y, 14, 0xffcc22, 0.72)
-      .setDepth(DEPTH.rhythmInputBack)
-      .setBlendMode(Phaser.BlendModes.ADD);
-    this.tweens.add({
-      targets: ring,
-      scale: { from: 0.32, to: 2.85 },
-      alpha: { from: 0.95, to: 0 },
-      duration: 410,
-      ease: "Cubic.easeOut",
-      onComplete: () => ring.destroy(),
-    });
-    const burst = this.add
-      .circle(x, y, 10, 0xfff0aa, 0.45)
-      .setDepth(DEPTH.rhythmInputBack + 1)
-      .setBlendMode(Phaser.BlendModes.ADD);
-    this.tweens.add({
-      targets: burst,
-      scale: { from: 0.18, to: 3.4 },
-      alpha: { from: 0.85, to: 0 },
-      duration: 480,
-      ease: "Quart.easeOut",
-      onComplete: () => burst.destroy(),
-    });
-    const praise = this.add
-      .text(x, y - this.slotSz * 0.7, "PERFECT!!", {
-        fontFamily: '"Dela Gothic One", Impact, "Arial Black", sans-serif',
-        fontSize: "38px",
-        color: "#ffee55",
-        stroke: "#3a1a00",
-        strokeThickness: 8,
-      })
-      .setOrigin(0.5)
-      .setDepth(DEPTH.rhythmInputPraise)
-      .setScale(0.12)
-      .setAlpha(0);
-    this.tweens.add({
-      targets: praise,
-      scale: 1.05,
-      alpha: 1,
-      duration: 480,
-      ease: "Back.easeOut",
-      onComplete: () => {
-        this.tweens.add({
-          targets: praise,
-          alpha: 0,
-          y: praise.y - 22,
-          duration: 300,
-          ease: "Sine.easeIn",
-          delay: 150,
-          onComplete: () => praise.destroy(),
-        });
-      },
-    });
-    audio.playClick({ pan: PAN_PLAYER, volume: 0.68 });
-    audio.playSpecial({ pan: PAN_PLAYER, volume: 0.92 });
-  }
-
-  private spawnGoodRhythmFeedback(x: number, y: number): void {
-    this.emitSmallGoodSparks(x, y);
-    const g = this.add
-      .text(x, y + this.slotSz * 0.45, "GOOD", {
-        font: `700 15px ${FONT}`,
-        color: "#eef4fc",
-        stroke: "#000000",
-        strokeThickness: 5,
-      })
-      .setOrigin(0.5)
-      .setDepth(DEPTH.rhythmInputPraise)
-      .setAlpha(0);
-    this.tweens.add({
-      targets: g,
-      alpha: 0.82,
-      duration: 100,
-      onComplete: () => {
-        this.tweens.add({
-          targets: g,
-          alpha: 0,
-          duration: 240,
-          delay: 100,
-          onComplete: () => g.destroy(),
-        });
-      },
-    });
-    audio.playClick({ pan: PAN_PLAYER, volume: 0.5 });
-  }
-
-  private emitSmallGoodSparks(x: number, y: number): void {
-    const emitter = this.add.particles(x, y, "spark", {
-      speed: { min: 32, max: 120 },
-      angle: { min: 0, max: 360 },
-      scale: { start: 1.0, end: 0 },
-      tint: 0xffffff,
-      lifespan: 300,
-      quantity: 7,
-      emitting: false,
-    });
-    emitter.setDepth(DEPTH.sparks);
-    emitter.explode(7);
-    this.time.delayedCall(400, () => emitter.destroy());
+    this.rhythmInputVfx.spawnForTiming(
+      timing,
+      s.bg.x,
+      s.bg.y,
+      this.slotSz,
+    );
   }
 
   /**
