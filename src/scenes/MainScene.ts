@@ -57,7 +57,42 @@ const TOTAL_BEATS = SEQ_LEN * 2;
 const RESOLVE_BEATS_PER_STEP = 2;
 const RESOLVE_TOTAL_TICKS = SEQ_LEN * RESOLVE_BEATS_PER_STEP;
 
-const HP_INIT = { player: 100, kaiju: 100 } as const;
+const HP_INIT = { player: 100 } as const;
+
+/**
+ * Per-rank kaiju configuration. Adjust numbers here to tune difficulty
+ * without touching the wave-flow code; Phase 6 will split this into
+ * `src/config/enemies.ts` so non-coders can iterate on balance.
+ */
+type KaijuRank = "zako" | "boss";
+
+interface KaijuRankStats {
+  readonly texture: string;
+  readonly hp: number;
+  readonly scaleMul: number;
+  readonly label: string;
+  readonly labelColor: string;
+}
+
+const KAIJU_STATS: Readonly<Record<KaijuRank, KaijuRankStats>> = {
+  zako: {
+    texture: "kaiju-zako",
+    hp: 100,
+    scaleMul: 1.0,
+    label: "KAIJU",
+    labelColor: "#cc3333",
+  },
+  boss: {
+    texture: "kaiju-boss",
+    hp: 180,
+    scaleMul: 1.18,
+    label: "BOSS",
+    labelColor: "#ff4444",
+  },
+} as const;
+
+/** Ordinary waves; every Nth wave swaps to a boss rank. */
+const BOSS_EVERY = 3;
 const OVERHEAT_THRESHOLD = 100;
 const OVERHEAT_STREAK_LIMIT = 3;
 
@@ -198,7 +233,11 @@ export class MainScene extends Phaser.Scene {
   /* ---------- game state ---------- */
   private playerHP = HP_INIT.player;
   private playerHeat = 0;
-  private kaijuHP = HP_INIT.kaiju;
+  private kaijuHP = KAIJU_STATS.zako.hp;
+  /** Max HP for the current kaiju — drives the HP bar fill ratio. */
+  private currentKaijuMaxHP = KAIJU_STATS.zako.hp;
+  /** 1-based wave index. Increments at the start of every beginWave(). */
+  private wave = 0;
   private score = 0;
   private ohStreak = 0;
   private phase = GamePhase.RHYTHM_KAIJU;
@@ -241,6 +280,8 @@ export class MainScene extends Phaser.Scene {
    */
   private kaijuBody!: Phaser.GameObjects.Image;
   private playerBody!: Phaser.GameObjects.Image;
+  /** Zako / Boss label under the kaiju body; text & color update per rank. */
+  private kaijuLabel!: Phaser.GameObjects.Text;
   private kaijuHPText!: Phaser.GameObjects.Text;
   private playerHPText!: Phaser.GameObjects.Text;
   private playerHeatText!: Phaser.GameObjects.Text;
@@ -262,9 +303,26 @@ export class MainScene extends Phaser.Scene {
   private timingBar!: Phaser.GameObjects.Rectangle;
   private beatFlash!: Phaser.GameObjects.Rectangle;
   private slotSz = 56;
+  /**
+   * Baseline edge length (px) for combatant bodies, captured once in
+   * buildCharacters and reused every time a rank swap needs to resize
+   * the kaiju without querying the layout again.
+   */
+  private baseBodySize = 0;
 
-  /** Cached once after buildUI; avoids per-beat allocation. */
-  private bounceTargets: Phaser.GameObjects.GameObject[] = [];
+  /**
+   * Cached once after buildUI. Each entry stores the game object plus
+   * the scale at which its sprite should sit "at rest", so `pulseBeat`
+   * can bounce uniformly even when sprites use `setDisplaySize`
+   * (which pushes the intrinsic scale far below 1).
+   */
+  private bounceTargets: ReadonlyArray<{
+    readonly obj: Phaser.GameObjects.GameObject & {
+      scaleX: number;
+      scaleY: number;
+    };
+    baseScale: number;
+  }> = [];
 
   constructor() {
     super("MainScene");
@@ -317,7 +375,9 @@ export class MainScene extends Phaser.Scene {
   private resetState(): void {
     this.playerHP = HP_INIT.player;
     this.playerHeat = 0;
-    this.kaijuHP = HP_INIT.kaiju;
+    this.kaijuHP = KAIJU_STATS.zako.hp;
+    this.currentKaijuMaxHP = KAIJU_STATS.zako.hp;
+    this.wave = 0;
     this.score = 0;
     this.ohStreak = 0;
     this.phase = GamePhase.RHYTHM_KAIJU;
@@ -381,13 +441,16 @@ export class MainScene extends Phaser.Scene {
   private buildCharacters(W: number, H: number): void {
     const cy = H * 0.22;
     const sz = Math.min(80, W * 0.085);
+    this.baseBodySize = sz;
     this.barMaxW = sz * 1.6;
     const barH = 7;
     const barGap = 14;
 
     const kx = W * 0.25;
+    // Start as zako; beginWave() re-applies the correct rank on every
+    // encounter so texture/scale stay in sync with the wave counter.
     this.kaijuBody = this.add
-      .image(kx, cy, "kaiju-zako")
+      .image(kx, cy, KAIJU_STATS.zako.texture)
       .setDisplaySize(sz, sz);
     this.add
       .rectangle(kx, cy - sz / 2 - barGap, this.barMaxW, barH, 0x222222)
@@ -408,7 +471,13 @@ export class MainScene extends Phaser.Scene {
       13,
       "#44cc44",
     ).setOrigin(0.5, 1);
-    this.txt(kx, cy + sz / 2 + 8, "KAIJU", 11, "#cc3333").setOrigin(0.5, 0);
+    this.kaijuLabel = this.txt(
+      kx,
+      cy + sz / 2 + 8,
+      KAIJU_STATS.zako.label,
+      11,
+      KAIJU_STATS.zako.labelColor,
+    ).setOrigin(0.5, 0);
 
     const px = W * 0.75;
     this.playerBody = this.add
@@ -620,15 +689,36 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
-  /** Builds the cached array of objects that bounce on every beat. */
+  /**
+   * Builds the cached list of objects that bounce on every beat.
+   * We snapshot each object's current scale so pulseBeat() can pulse
+   * *relative* to that rest-state, which matters for the combatant
+   * Images (sized via setDisplaySize → intrinsic scale far below 1).
+   */
   private cacheBounceTargets(): void {
-    this.bounceTargets = [
+    const items = [
       this.kaijuBody,
       this.playerBody,
       this.phaseLabel,
       this.scoreLabel,
       ...this.btns.map((b) => b.container),
     ];
+    this.bounceTargets = items.map((obj) => ({
+      obj,
+      baseScale: obj.scaleX,
+    }));
+  }
+
+  /**
+   * Re-snapshot a tracked object's baseline scale after we mutate it
+   * (e.g., kaiju resize between ranks). No-op if the object was never
+   * cached as a bounce target.
+   */
+  private refreshBounceTargetScale(
+    obj: Phaser.GameObjects.GameObject & { scaleX: number },
+  ): void {
+    const entry = this.bounceTargets.find((t) => t.obj === obj);
+    if (entry) entry.baseScale = obj.scaleX;
   }
 
   private txt(
@@ -686,10 +776,37 @@ export class MainScene extends Phaser.Scene {
   /* ============================================================ */
 
   private beginWave(): void {
-    this.kaijuHP = HP_INIT.kaiju;
-    this.kaijuBody.setAlpha(1).setScale(1);
+    this.wave += 1;
+    const rank: KaijuRank =
+      this.wave % BOSS_EVERY === 0 ? "boss" : "zako";
+    this.applyKaijuRank(rank);
     this.refreshHUD();
+    console.log(
+      `[Wave ${this.wave}] ${rank.toUpperCase()} — HP ${this.kaijuHP}`,
+    );
     this.startRhythmSequence();
+  }
+
+  /**
+   * Swap the kaiju sprite's texture, size, HP budget, and name label
+   * to match the given rank. Kept separate from beginWave so later
+   * phases (BOSS warning screens, GIGA kaiju finishers) can compose it.
+   */
+  private applyKaijuRank(rank: KaijuRank): void {
+    const stats = KAIJU_STATS[rank];
+    this.currentKaijuMaxHP = stats.hp;
+    this.kaijuHP = stats.hp;
+
+    const size = this.baseBodySize * stats.scaleMul;
+    this.kaijuBody
+      .setTexture(stats.texture)
+      .setDisplaySize(size, size)
+      .setAlpha(1)
+      .clearTint();
+    // setDisplaySize changes the intrinsic scale — keep pulseBeat honest.
+    this.refreshBounceTargetScale(this.kaijuBody);
+
+    this.kaijuLabel.setText(stats.label).setColor(stats.labelColor);
   }
 
   /* ---- Rhythm phase (Foreshadow + Programming, 8 beats) ---- */
@@ -910,11 +1027,11 @@ export class MainScene extends Phaser.Scene {
       ease: "Sine.easeOut",
     });
 
-    for (const obj of this.bounceTargets) {
+    for (const { obj, baseScale } of this.bounceTargets) {
       this.tweens.add({
         targets: obj,
-        scaleX: 1.05,
-        scaleY: 1.05,
+        scaleX: baseScale * 1.05,
+        scaleY: baseScale * 1.05,
         duration: 80,
         yoyo: true,
         ease: "Sine.easeOut",
@@ -1247,7 +1364,8 @@ export class MainScene extends Phaser.Scene {
     const ht = Math.max(0, this.playerHeat);
 
     this.kaijuHPText.setText(`HP ${kh}`);
-    this.kaijuHPBar.displayWidth = this.barMaxW * (kh / HP_INIT.kaiju);
+    this.kaijuHPBar.displayWidth =
+      this.barMaxW * (kh / this.currentKaijuMaxHP);
 
     this.playerHPText.setText(`HP ${ph}`);
     this.playerHPBar.displayWidth = this.barMaxW * (ph / HP_INIT.player);

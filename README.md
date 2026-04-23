@@ -16,7 +16,7 @@ Built with **Phaser 3 shapes and text** plus a pair of bespoke Midjourney flat-v
    - **SPECIAL** — massive damage + pierces GUARD; adds +80 Heat
 3. **Resolution**: Each of the 4 steps plays across **two beats** at BPM 120 — a _telegraph_ beat where the kaiju shows its move, then a _resolve_ beat where your response lands. 8 beats total, call-and-response.
 4. **Overheat**: If your mech's Heat reaches 100, your actions are cancelled. Three consecutive overheated turns = meltdown game over.
-5. **Waves**: Defeat the kaiju to advance. How many waves of kaiju can your pilot survive?
+5. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends out a larger, higher-HP **BOSS** kaiju — brace yourself. How many waves of kaiju can your pilot survive?
 
 ### Input timing
 
@@ -75,6 +75,7 @@ public/
     images/
       mech-player.png    # Player mech — Midjourney (flat vector style)
       kaiju-zako.png     # Zako kaiju — Midjourney (flat vector style)
+      kaiju-boss.png     # Boss kaiju — appears every 3rd wave
     audio/               # Reserved for future sample banks
     fonts/               # Reserved for webfont fallbacks
 ```
@@ -92,6 +93,17 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop or GAME_OVER)
 - Beat-count based: `update()` derives the current beat from `(now - startTime) / beatLength`, independent of frame rate
 - One-beat lead-in before the first beat fires
 - Buttons are enabled ±200 ms before the first player beat (early input support)
+
+### Kaiju ranks
+
+Waves cycle between two ranks driven by the `KAIJU_STATS` config in `MainScene.ts`:
+
+| Rank | Frequency | Texture | HP | Scale |
+| --- | --- | --- | --- | --- |
+| `zako` | Default | `kaiju-zako` | 100 | 1.0× |
+| `boss` | Every `BOSS_EVERY = 3` waves (3, 6, 9…) | `kaiju-boss` | 180 | 1.18× |
+
+`applyKaijuRank()` swaps the body's texture, display size, and HP bar denominator in one place, so adding a `giga` tier in Phase 6 only means adding a row to `KAIJU_STATS`.
 
 ### Combat system
 
@@ -112,7 +124,7 @@ Rock-paper-scissors style resolution with Heat management. Each step is split ov
 - **Damage popups**: Floating text that drifts up and fades (red for damage, blue for COOL, purple for SPECIAL)
 - **Camera shake**: Intensity and duration scale with damage (light for blocks, heavy for SPECIAL)
 - **Hit sparks**: Particle burst of coloured rectangles at point of impact
-- **Beat bounce**: Characters, labels, and buttons pulse scale 1.0 → 1.05 → 1.0 every beat
+- **Beat bounce**: Characters, labels, and buttons pulse by +5 % every beat, relative to each object's rest scale (Image sprites keep their `setDisplaySize` scaling intact across the pulse)
 - **Body flash**: Both combatant sprites flash via `setTint` and snap back after 120 ms from a single `flash()` helper
 
 ### Audio (Phase 2)
