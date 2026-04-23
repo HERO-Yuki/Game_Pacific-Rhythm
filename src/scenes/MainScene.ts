@@ -78,9 +78,10 @@ const OVERHEAT_STREAK_LIMIT = 3;
 
 /**
  * Heat at or above this value is the "danger zone": the screen shows a
- * pulsing red vignette. Dropping back below triggers a relief flash.
+ * pulsing red vignette. Dropping back below triggers a relief flash
+ * plus a blue steam burst to reward the clutch cool-down.
  */
-const HEAT_DANGER = 70;
+const HEAT_DANGER = 80;
 
 /**
  * Hit-stop durations per event kind (milliseconds). Tuned to roughly
@@ -133,6 +134,14 @@ const PAL = {
   btnOn: 0x2a2f3e,
   btnHover: 0x3a4f6e,
   btnOff: 0x181c24,
+  /**
+   * Dark-red resting colour for the SPECIAL button. The visual alone
+   * warns the player "pick me carefully" before they even read the
+   * label — reinforced by the smaller footprint below.
+   */
+  specialBtnOn: 0x6b1818,
+  specialBtnHover: 0x8c2525,
+  specialBtnOff: 0x3c0d0d,
   hpGreen: 0x44cc44,
   heatOrange: 0xff6600,
   heatRed: 0xff0000,
@@ -148,8 +157,28 @@ const ACT_COL: Record<ActionType, number> = {
   [ActionType.IDLE]: 0x666666,
 };
 
-/** Neutral grey used to paint a sand-weather masked kaiju slot. */
+/** Neutral grey used to paint a masked kaiju slot of any origin. */
 const PAL_SAND_MASK = 0x7a7a86;
+
+/**
+ * Text + font size for a masked kaiju reveal slot. `[ ??? ]` is the
+ * display brief from the design spec; we drop the label font down
+ * so the 7-character string fits comfortably inside the 56 px slot
+ * even at the narrowest responsive width.
+ */
+const KAIJU_NOISE_TEXT = "[ ??? ]";
+const KAIJU_NOISE_FONT_PX = 11;
+const KAIJU_SLOT_FONT_PX = 13;
+
+/**
+ * From this wave onward, every kaiju reveal slot rolls an extra
+ * independent chance to be obscured as "[ ??? ]". This layers on
+ * top of the sand-weather guaranteed mask — the idea is that once
+ * the player knows the core loop, the game starts asking them to
+ * trade "safe GUARD" for "risky read" on a per-slot basis.
+ */
+const KAIJU_BASELINE_NOISE_WAVE = 3;
+const KAIJU_BASELINE_NOISE_CHANCE = 0.2;
 
 const ACT_SHORT: Record<ActionType, string> = {
   [ActionType.ATTACK]: "ATK",
@@ -170,6 +199,38 @@ const ACT_KEY_HINT: Record<ActionType, string> = {
   [ActionType.COOL]: "D / \u2192",
   [ActionType.SPECIAL]: "W / \u2191",
   [ActionType.IDLE]: "",
+};
+
+/**
+ * Emoji glyph stamped in front of every action label for language-
+ * independent recognition. Picked to read cleanly on both the
+ * modern system-ui emoji set and Noto Emoji fallbacks.
+ */
+const ACT_EMOJI: Record<ActionType, string> = {
+  [ActionType.ATTACK]: "\u2694\uFE0F", // crossed swords
+  [ActionType.GUARD]: "\uD83D\uDEE1\uFE0F", // shield
+  [ActionType.COOL]: "\u2744\uFE0F", // snowflake
+  [ActionType.SPECIAL]: "\u26A0\uFE0F", // warning sign
+  [ActionType.IDLE]: "",
+};
+
+/**
+ * Per-action button footprint at design resolution (960x540).
+ * Encodes a risk-reward hierarchy in pure pixels:
+ *
+ *  - ATTACK gets the biggest slab so the bread-and-butter move is
+ *    the easiest to mash during a pressured rhythm window.
+ *  - GUARD and COOL sit at a middle size — important but used
+ *    reactively, not hammered.
+ *  - SPECIAL is the smallest target on purpose; paired with its
+ *    dark-red colour it becomes almost impossible to mis-tap.
+ */
+const ACT_BTN_WIDTH: Record<ActionType, number> = {
+  [ActionType.ATTACK]: 200,
+  [ActionType.GUARD]: 150,
+  [ActionType.COOL]: 150,
+  [ActionType.SPECIAL]: 100,
+  [ActionType.IDLE]: 0,
 };
 
 /**
@@ -258,12 +319,14 @@ export class MainScene extends Phaser.Scene {
   /** Active weather for the current phase — drives combat multipliers. */
   private currentWeather: Weather = "clear";
   /**
-   * Index (0..SEQ_LEN-1) of the kaiju reveal slot masked as "?" this
-   * wave under sand weather, or -1 for no mask. Rolled once per wave
-   * so the obscured slot is stable across the Reading phase but
-   * unpredictable between encounters.
+   * Per-slot mask flags for the current wave (length SEQ_LEN). A slot
+   * is masked if either (a) sand weather chose it as its guaranteed
+   * mask, or (b) once the encounter counter is past
+   * `KAIJU_BASELINE_NOISE_WAVE` it independently rolled below the
+   * per-slot noise chance. Stable across the Reading phase so the
+   * player can commit to a plan; re-rolled every wave.
    */
-  private kaijuNoiseSlotIdx = -1;
+  private kaijuNoiseMask: boolean[] = [];
   private score = 0;
   private ohStreak = 0;
   private phase = GamePhase.RHYTHM_KAIJU;
@@ -410,7 +473,7 @@ export class MainScene extends Phaser.Scene {
     this.wave = 0;
     this.currentPhaseIndex = -1;
     this.currentWeather = "clear";
-    this.kaijuNoiseSlotIdx = -1;
+    this.kaijuNoiseMask = [];
     this.score = 0;
     this.ohStreak = 0;
     this.phase = GamePhase.RHYTHM_KAIJU;
@@ -658,10 +721,10 @@ export class MainScene extends Phaser.Scene {
       ActionType.COOL,
       ActionType.SPECIAL,
     ];
-    // Larger footprint sized for comfortable thumb taps on mobile;
-    // see HIT_PAD_* below for the invisible overflow that widens the
-    // touch target without growing the visual rectangle.
-    const bw = Math.min(148, W * 0.16);
+    // Fixed per-action footprints (design-res pixels) encode a
+    // risk/importance hierarchy straight into the tap target: ATTACK
+    // is the biggest, SPECIAL the tiniest so panicked thumbs don't
+    // mis-fire the overheat-bomb move.
     const bh = 58;
     const gap = 14;
     // Horizontal pad stays small so neighbouring tap zones just touch
@@ -669,18 +732,30 @@ export class MainScene extends Phaser.Scene {
     // landing slightly above or below the button still register.
     const HIT_PAD_X = 6;
     const HIT_PAD_Y = 20;
-    const totalW = acts.length * bw + (acts.length - 1) * gap;
-    const x0 = (W - totalW) / 2 + bw / 2;
+    const totalW =
+      acts.reduce((sum, a) => sum + ACT_BTN_WIDTH[a], 0) +
+      (acts.length - 1) * gap;
+    let cursorX = (W - totalW) / 2;
 
     this.btns = [];
-    for (let i = 0; i < acts.length; i++) {
-      const action = acts[i];
-      const bx = x0 + i * (bw + gap);
+    for (const action of acts) {
+      const bw = ACT_BTN_WIDTH[action];
+      const bx = cursorX + bw / 2;
+      cursorX += bw + gap;
 
+      const pal = this.buttonPalette(action);
       const bg = this.add
-        .rectangle(0, 0, bw, bh, PAL.btnOn)
+        .rectangle(0, 0, bw, bh, pal.on)
         .setStrokeStyle(2, ACT_COL[action]);
-      const lbl = this.txt(0, -9, action, 14, "#e6edf3").setOrigin(0.5);
+      // Emoji + label keeps iconography language-independent while
+      // still letting keyboard users memorise the text name.
+      const lbl = this.txt(
+        0,
+        -9,
+        `${ACT_EMOJI[action]} ${action}`,
+        14,
+        "#e6edf3",
+      ).setOrigin(0.5);
       const keyHint = this.txt(
         0,
         13,
@@ -698,6 +773,10 @@ export class MainScene extends Phaser.Scene {
         bw + HIT_PAD_X * 2,
         bh + HIT_PAD_Y * 2,
       );
+      // Press-in / bounce-back tweens give a physical "heavy switch"
+      // feel. The click action fires on pointerdown so the rhythm
+      // timing window is honoured even if the player lifts their
+      // thumb off the edge of the button.
       ctr
         .setInteractive({
           hitArea,
@@ -705,12 +784,18 @@ export class MainScene extends Phaser.Scene {
           useHandCursor: true,
         })
         .on("pointerover", () => {
-          if (this.buttonsReady) bg.setFillStyle(PAL.btnHover);
+          if (this.buttonsReady) bg.setFillStyle(pal.hover);
         })
         .on("pointerout", () => {
-          bg.setFillStyle(this.buttonsReady ? PAL.btnOn : PAL.btnOff);
+          bg.setFillStyle(this.buttonsReady ? pal.on : pal.off);
+          this.releaseButtonTween(ctr);
         })
-        .on("pointerdown", () => this.onActionClick(action));
+        .on("pointerdown", () => {
+          this.pressButtonTween(ctr);
+          this.onActionClick(action);
+        })
+        .on("pointerup", () => this.releaseButtonTween(ctr))
+        .on("pointerupoutside", () => this.releaseButtonTween(ctr));
 
       this.btns.push({ container: ctr, bg, action });
     }
@@ -722,6 +807,46 @@ export class MainScene extends Phaser.Scene {
       11,
       "#4a5568",
     ).setOrigin(0.5, 0);
+  }
+
+  /**
+   * Palette triple used by a button in its on / hover / off states.
+   * SPECIAL gets the dark-red palette so the most dangerous action
+   * is also visually tagged before the player even reads the label.
+   */
+  private buttonPalette(
+    action: ActionType,
+  ): { readonly on: number; readonly hover: number; readonly off: number } {
+    if (action === ActionType.SPECIAL) {
+      return {
+        on: PAL.specialBtnOn,
+        hover: PAL.specialBtnHover,
+        off: PAL.specialBtnOff,
+      };
+    }
+    return { on: PAL.btnOn, hover: PAL.btnHover, off: PAL.btnOff };
+  }
+
+  /** Press-in tween: snap down to 85% quickly for a weighty feel. */
+  private pressButtonTween(ctr: Phaser.GameObjects.Container): void {
+    this.tweens.killTweensOf(ctr);
+    this.tweens.add({
+      targets: ctr,
+      scale: 0.85,
+      duration: 50,
+      ease: "Cubic.easeIn",
+    });
+  }
+
+  /** Release tween: overshoot back to 1.0 like a sprung heavy switch. */
+  private releaseButtonTween(ctr: Phaser.GameObjects.Container): void {
+    this.tweens.killTweensOf(ctr);
+    this.tweens.add({
+      targets: ctr,
+      scale: 1,
+      duration: 280,
+      ease: "Back.easeOut",
+    });
   }
 
   /**
@@ -758,9 +883,14 @@ export class MainScene extends Phaser.Scene {
   private flashButtonForAction(action: ActionType): void {
     const btn = this.btns.find((b) => b.action === action);
     if (!btn) return;
-    btn.bg.setFillStyle(PAL.btnHover);
+    const pal = this.buttonPalette(action);
+    btn.bg.setFillStyle(pal.hover);
+    // Run the same press/release tweens the pointer path uses so
+    // keyboard input feels identical to touch input.
+    this.pressButtonTween(btn.container);
     this.time.delayedCall(90, () => {
-      btn.bg.setFillStyle(this.buttonsReady ? PAL.btnOn : PAL.btnOff);
+      btn.bg.setFillStyle(this.buttonsReady ? pal.on : pal.off);
+      this.releaseButtonTween(btn.container);
     });
   }
 
@@ -890,21 +1020,27 @@ export class MainScene extends Phaser.Scene {
     this.applyKaijuRank(rank);
     this.rollWeatherForWave();
     this.refreshHUD();
+    const maskedIdx = this.kaijuNoiseMask
+      .map((m, i) => (m ? i : -1))
+      .filter((i) => i >= 0);
     console.log(
       `[Wave ${this.wave}] ${rank.toUpperCase()} — HP ${this.kaijuHP} — ` +
         `WEATHER ${this.currentWeather.toUpperCase()}` +
-        (this.kaijuNoiseSlotIdx >= 0
-          ? ` (mask slot ${this.kaijuNoiseSlotIdx})`
-          : ""),
+        (maskedIdx.length > 0 ? ` (mask ${maskedIdx.join(",")})` : ""),
     );
     this.startRhythmSequence();
   }
 
   /**
-   * Re-roll weather when we cross a phase boundary, then pick a fresh
-   * sand-mask slot for this wave (sand is the only weather that uses
-   * per-wave randomisation — its effect would lose bite if the masked
-   * slot stayed constant across three waves in a row).
+   * Re-roll weather when we cross a phase boundary, then compose the
+   * per-slot mask for this wave. Two noise sources are OR-ed together:
+   *
+   *  1. Sand weather picks one guaranteed slot to fog up.
+   *  2. Once `this.wave >= KAIJU_BASELINE_NOISE_WAVE`, each slot
+   *     independently rolls a 20% chance to be masked.
+   *
+   * Rolling once per wave keeps the fog stable while the player is
+   * programming their response, and unpredictable between encounters.
    */
   private rollWeatherForWave(): void {
     const phaseIdx = Math.floor((this.wave - 1) / BOSS_EVERY);
@@ -914,10 +1050,19 @@ export class MainScene extends Phaser.Scene {
       this.refreshWeatherHUD();
     }
     const eff = this.weatherEffect();
-    this.kaijuNoiseSlotIdx =
+    const sandIdx =
       eff.kaijuNoiseSlots > 0
         ? Phaser.Math.Between(0, SEQ_LEN - 1)
         : -1;
+    const baselineActive = this.wave >= KAIJU_BASELINE_NOISE_WAVE;
+    const mask: boolean[] = new Array(SEQ_LEN).fill(false);
+    for (let i = 0; i < SEQ_LEN; i++) {
+      if (i === sandIdx) mask[i] = true;
+      if (baselineActive && Math.random() < KAIJU_BASELINE_NOISE_CHANCE) {
+        mask[i] = true;
+      }
+    }
+    this.kaijuNoiseMask = mask;
   }
 
   /** Convenience accessor so consumers never touch the table directly. */
@@ -1064,15 +1209,20 @@ export class MainScene extends Phaser.Scene {
   private revealKaijuSlot(i: number): void {
     const action = this.kaijuSeq[i];
     const s = this.kSlots[i];
-    const masked = i === this.kaijuNoiseSlotIdx;
-    // Masked slots get a neutral grey coat + "?" so the player cannot
-    // deduce the action from the colour either. The real action will
-    // still resolve normally — and telegraphKaiju will unmask the slot
-    // a beat before it lands so players can learn from the outcome.
+    const masked = this.kaijuNoiseMask[i] === true;
+    // Masked slots get a neutral grey coat + "[ ??? ]" so the player
+    // cannot deduce the action from the colour either. The real
+    // action will still resolve normally — telegraphKaiju will
+    // unmask the slot a beat before it lands so players can learn
+    // from the outcome.
     const col = masked ? PAL_SAND_MASK : ACT_COL[action];
     s.bg.setFillStyle(col, 0.5);
     s.border.setStrokeStyle(2, col);
-    s.label.setText(masked ? "?" : ACT_SHORT[action]);
+    if (masked) {
+      s.label.setFontSize(KAIJU_NOISE_FONT_PX).setText(KAIJU_NOISE_TEXT);
+    } else {
+      s.label.setFontSize(KAIJU_SLOT_FONT_PX).setText(ACT_SHORT[action]);
+    }
     this.tweens.add({
       targets: [s.bg, s.label],
       alpha: { from: 0, to: 1 },
@@ -1174,8 +1324,30 @@ export class MainScene extends Phaser.Scene {
   private showSlotInput(pIdx: number, action: ActionType): void {
     const s = this.pSlots[pIdx];
     s.bg.setFillStyle(ACT_COL[action], 0.5);
-    s.border.setStrokeStyle(2, ACT_COL[action]);
+    // Border snaps to pure white for the punch-in frame, then eases
+    // back to the action-tinted stroke so the slot reads as "locked".
+    s.border.setStrokeStyle(3, 0xffffff);
+    this.time.delayedCall(160, () => {
+      s.border.setStrokeStyle(2, ACT_COL[action]);
+    });
     s.label.setText(ACT_SHORT[action]).setColor("#e6edf3");
+
+    // Additive white rectangle sitting on top of the slot for a
+    // single-frame bloom. BlendModes.ADD means we brighten whatever
+    // is underneath without needing to track per-slot colours.
+    const flash = this.add
+      .rectangle(s.bg.x, s.bg.y, s.bg.width, s.bg.height, 0xffffff, 0.9)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setDepth(DEPTH.sparks);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      scaleX: 1.18,
+      scaleY: 1.18,
+      duration: 220,
+      ease: "Cubic.easeOut",
+      onComplete: () => flash.destroy(),
+    });
 
     this.tweens.add({
       targets: s.bg,
@@ -1266,14 +1438,14 @@ export class MainScene extends Phaser.Scene {
     const kAct = this.kaijuSeq[i];
     const kR = this.kaijuBody;
 
-    // If this slot was masked by sand weather, reveal it now — the
-    // action is about to land, so hiding it any longer would just
-    // confuse the player instead of creating suspense.
-    if (i === this.kaijuNoiseSlotIdx) {
+    // If this slot was masked (by sand or by the baseline fog), the
+    // action is about to land anyway — reveal it so players can
+    // learn from the outcome instead of staring at the "?" forever.
+    if (this.kaijuNoiseMask[i] === true) {
       const s = this.kSlots[i];
       s.bg.setFillStyle(ACT_COL[kAct], 0.5);
       s.border.setStrokeStyle(2, ACT_COL[kAct]);
-      s.label.setText(ACT_SHORT[kAct]);
+      s.label.setFontSize(KAIJU_SLOT_FONT_PX).setText(ACT_SHORT[kAct]);
     }
 
     switch (kAct) {
@@ -1386,6 +1558,10 @@ export class MainScene extends Phaser.Scene {
     let msg: string;
     const kR = this.kaijuBody;
     const pR = this.playerBody;
+    // Capture the pre-combat kaiju HP so we can distinguish a kill
+    // (transition across zero) from a non-fatal hit at the end of
+    // the method. Used to drive the gold EXCELLENT!! praise pop.
+    const prevKaijuHP = this.kaijuHP;
 
     switch (pAct) {
       case ActionType.ATTACK:
@@ -1496,6 +1672,16 @@ export class MainScene extends Phaser.Scene {
 
     console.log(`[Step ${step}] P:${pAct} vs K:${kAct} \u2192 ${msg}`);
     this.showMessage(msg);
+
+    // Praise pops: kills always win over guard-breaks — the kill is
+    // the bigger narrative beat. Only non-fatal SPECIAL-through-GUARD
+    // hits trigger the CRITICAL callout.
+    const killed = prevKaijuHP > 0 && this.kaijuHP <= 0;
+    if (killed) {
+      this.showPraise("EXCELLENT!!");
+    } else if (pAct === ActionType.SPECIAL && kAct === ActionType.GUARD) {
+      this.showPraise("CRITICAL!!");
+    }
   }
 
   /* ============================================================ */
@@ -1613,7 +1799,13 @@ export class MainScene extends Phaser.Scene {
       s.border.setFillStyle();
       s.border.setStrokeStyle(2, PAL.slotStroke);
       s.border.setScale(1);
-      s.label.setText("").setAlpha(1).setColor("#e6edf3");
+      // Reset the label font: revealKaijuSlot may have shrunk it for
+      // a masked "[ ??? ]" render that is now being cleared.
+      s.label
+        .setFontSize(KAIJU_SLOT_FONT_PX)
+        .setText("")
+        .setAlpha(1)
+        .setColor("#e6edf3");
     }
   }
 
@@ -1642,12 +1834,13 @@ export class MainScene extends Phaser.Scene {
 
   private enableButtons(on: boolean): void {
     for (const b of this.btns) {
+      const pal = this.buttonPalette(b.action);
       if (on) {
         b.container.setInteractive({ useHandCursor: true });
-        b.bg.setFillStyle(PAL.btnOn).setAlpha(1);
+        b.bg.setFillStyle(pal.on).setAlpha(1);
       } else {
         b.container.disableInteractive();
-        b.bg.setFillStyle(PAL.btnOff).setAlpha(0.5);
+        b.bg.setFillStyle(pal.off).setAlpha(0.5);
       }
     }
   }
@@ -1728,13 +1921,34 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
-   * Bright blue-white camera flash to celebrate leaving the danger
-   * zone. Uses Phaser's built-in effect so it sits above every layer,
-   * including the overlays we manage ourselves.
+   * Bright blue-white camera flash + upward steam burst to celebrate
+   * leaving the danger zone. The camera.flash sits above every layer,
+   * and the particles trail up from the player body so the catharsis
+   * "belongs" to the mech that just vented its heat.
    */
   private playHeatReliefFlash(): void {
     const { r, g, b } = HEAT_RELIEF_RGB;
     this.cameras.main.flash(420, r, g, b);
+
+    const pR = this.playerBody;
+    const emitter = this.add.particles(pR.x, pR.y, "spark", {
+      // Narrow upward cone for a "steam vent" silhouette rather than
+      // a spherical puff. Phaser angles go clockwise from east, so
+      // 240°–300° covers the upper 60° sweep.
+      speed: { min: 140, max: 260 },
+      angle: { min: 240, max: 300 },
+      gravityY: -120,
+      scale: { start: 1.6, end: 0 },
+      alpha: { start: 0.9, end: 0 },
+      tint: [0x88ccff, 0xaaddff, 0xffffff],
+      lifespan: 720,
+      quantity: 30,
+      emitting: false,
+      blendMode: Phaser.BlendModes.ADD,
+    });
+    emitter.setDepth(DEPTH.sparks);
+    emitter.explode(30);
+    this.time.delayedCall(900, () => emitter.destroy());
   }
 
   private shake(intensity: number, duration = 140): void {
@@ -1771,6 +1985,46 @@ export class MainScene extends Phaser.Scene {
     this.tweens.add({
       targets: t,
       y: startY - 44,
+      alpha: { from: 1, to: 0 },
+      duration: 900,
+      ease: "Sine.easeOut",
+      onComplete: () => t.destroy(),
+    });
+  }
+
+  /**
+   * Giant gold praise-pop at screen centre for the game's two most
+   * satisfying moments: piercing a GUARD with SPECIAL (CRITICAL!!) and
+   * finishing a kaiju (EXCELLENT!!). The text scales up with a back-
+   * easing overshoot, drifts up, and fades — no stroke clash with the
+   * red danger vignette because the dark outline stays 3 px thick.
+   */
+  private showPraise(text: string): void {
+    const cx = this.scale.width / 2;
+    const cy = this.scale.height / 2;
+    const t = this.add
+      .text(cx, cy, text, {
+        fontFamily: FONT,
+        fontSize: "48px",
+        color: "#ffd24a",
+        fontStyle: "bold",
+        stroke: "#3b1d00",
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.popText)
+      .setScale(0.4)
+      .setAlpha(1);
+
+    this.tweens.add({
+      targets: t,
+      scale: { from: 0.4, to: 1.3 },
+      duration: 260,
+      ease: "Back.easeOut",
+    });
+    this.tweens.add({
+      targets: t,
+      y: cy - 70,
       alpha: { from: 1, to: 0 },
       duration: 900,
       ease: "Sine.easeOut",

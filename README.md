@@ -27,14 +27,18 @@ Each player beat has a **±200 ms** input window. Press within the window to reg
 
 You can mix and match input devices at any time — every scheme routes through the same `onActionClick()` timing gate, so touch, mouse, and keyboard feel identical.
 
-| Action | Button | Keyboard (left hand) | Keyboard (right hand) |
-| --- | --- | --- | --- |
-| ATTACK  | ATTACK  | **A** | **←** |
-| GUARD   | GUARD   | **S** | **↓** |
-| COOL    | COOL    | **D** | **→** |
-| SPECIAL | SPECIAL | **W** | **↑** |
+| Action | Button | Width | Base colour | Keyboard (left hand) | Keyboard (right hand) |
+| --- | --- | --- | --- | --- | --- |
+| ATTACK  | ⚔️ ATTACK  | 200 px | dark slate | **A** | **←** |
+| GUARD   | 🛡️ GUARD   | 150 px | dark slate | **S** | **↓** |
+| COOL    | ❄️ COOL    | 150 px | dark slate | **D** | **→** |
+| SPECIAL | ⚠️ SPECIAL | 100 px | **dark red** | **W** | **↑** |
 
-Action buttons carry the key hint underneath their label for discoverability, and their touch hit-zones extend ~6 px horizontally / ~20 px vertically past the visible rectangle for thumb-friendly taps on mobile. Arrow keys are captured so the embedding page never scrolls while the game has focus.
+The button footprints encode a risk/importance hierarchy: ATTACK is the biggest so the bread-and-butter move is the easiest to mash, GUARD and COOL are mid-sized reactive options, and SPECIAL is small and painted a warning red so panicked thumbs don't mis-fire the overheat-bomb move. Emojis in front of the label keep the iconography language-independent.
+
+Every press runs a press-in / bounce-back tween — the container scales to 85% on pointerdown with `Cubic.easeIn`, then overshoots back to 1.0 with `Back.easeOut` — so touch and keyboard input both feel like heavy mechanical switches. Key hints sit underneath each label for discoverability, and touch hit-zones extend ~6 px horizontally / ~20 px vertically past the visible rectangle for thumb-friendly taps on mobile. Arrow keys are captured so the embedding page never scrolls while the game has focus.
+
+When an action lands in the 4-slot programme, the slot's border snaps to pure white for 160 ms before easing back to the action-tinted stroke, and a short-lived additive (`BlendModes.ADD`) rectangle blooms over the slot so "locking" a choice reads as a tactile spark.
 
 ## Challenge alignment
 
@@ -132,13 +136,15 @@ Weather is a *phase-scoped* modifier bundled in [`src/config/weather.ts`](src/co
 | --- | --- | --- | --- | --- |
 | `clear`   | ×1.00 | ×1.00 | ×1.00 | — |
 | `snow`    | ×0.75 | ×1.50 | ×1.00 | — |
-| `sand`    | ×1.00 | ×1.00 | ×1.00 | 1 kaiju slot shows `?` |
+| `sand`    | ×1.00 | ×1.00 | ×1.00 | 1 kaiju slot shows `[ ??? ]` |
 | `drought` | ×1.00 | ×1.00 | ×1.50 | — |
 
 - **ATK dmg** multiplies every ATTACK-flavoured damage event (HIT, CLASH, kaiju ATTACK landing on a cooling mech). SPECIAL damage deliberately bypasses this so the big finisher still hits hard.
 - **COOL bonus** multiplies COOL's negative Heat delta; `snow` turns `-40` into `-60`.
 - **Heat gain** multiplies every positive Heat delta (ATTACK wind-up and SPECIAL charge).
-- **Sand mask** hides one random kaiju reveal slot as `?` during Reading; `telegraphKaiju()` unmasks it right before it resolves so the player still learns from the outcome.
+- **Sand mask** hides one random kaiju reveal slot as `[ ??? ]` during Reading; `telegraphKaiju()` unmasks it right before it resolves so the player still learns from the outcome.
+
+On top of the weather-driven sand mask there is a **baseline fog-of-war** rule: once `wave >= KAIJU_BASELINE_NOISE_WAVE` (3) every kaiju reveal slot independently rolls `KAIJU_BASELINE_NOISE_CHANCE` (20 %) of being masked. Both noise sources OR together into a single `kaijuNoiseMask: boolean[]` so the rendering path has one predicate to check, and the console log at wave start prints the masked indices for quick balance debugging.
 
 The multiplications themselves live in `src/config/weather.ts` as three pure functions — `adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain` — so balance tweaks and unit tests can exercise them without a Phaser runtime. `MainScene` keeps thin wrappers (`weatherAdjAtkDmg` et al.) that read `this.weatherEffect()` once so `executeCombat` call sites stay compact. ATK damage is clamped to at least 1 HP so rounding never silently turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK -25% / COOL +50%` etc.).
 
@@ -192,8 +198,11 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
   - `BREAK` (SPECIAL vs GUARD): **200 ms**
   - `SPECIAL` (regular hit): **180 ms**
   - `VULNERABLE` (COOL vs ATTACK): **160 ms**
-- **Heat danger vignette**: When Heat ≥ 70, a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
-- **Relief flash**: The instant a successful `COOL` pulls Heat back below 70, the vignette is cleared and `Camera.flash` bursts a blue-white `(136, 204, 255)` tint — the "I made it!" release.
+- **Heat danger vignette**: When Heat ≥ `HEAT_DANGER` (80), a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk.
+- **Relief flash + steam vent**: The instant a successful `COOL` pulls Heat back below 80, the vignette is cleared, `Camera.flash` bursts a blue-white `(136, 204, 255)` tint, and an **upward cone of light-blue additive particles** vents out of the player mech (30 particles, 240°–300° arc, gravityY -120, 720 ms lifespan). The "I made it!" release is now audible, visible, *and* feels like real steam escaping.
+- **Praise pops**: The two most satisfying combat moments trigger a giant centre-screen gold callout that scales up with `Back.easeOut` overshoot and drifts upward as it fades:
+  - `SPECIAL` vs `GUARD` (non-fatal) → **CRITICAL!!**
+  - Any hit that drops the kaiju to 0 HP → **EXCELLENT!!** (kills always win the callout slot over a simultaneous guard-break)
 
 ### Responsive canvas (Phase 4)
 
