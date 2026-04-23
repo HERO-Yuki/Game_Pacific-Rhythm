@@ -11,7 +11,11 @@ import { notifyWavedashLoadComplete } from "../utils/wavedash";
  *  all hardware. Player input is accepted within a ±200 ms window
  *  centred on each beat.
  *
- *  Flow: Rhythm (8 beats: foreshadow + program) → Resolution → loop
+ *  Flow:
+ *    Rhythm     (8 beats @ 60 BPM — kaiju reveal × 4 + player program × 4)
+ *    Resolution (8 beats @ 120 BPM — kaiju telegraph + player resolve, × 4 steps)
+ *    → loop back to Rhythm (or GAME_OVER)
+ *
  *  All visuals use Phaser shapes and text (no image assets).
  * =================================================================== */
 
@@ -45,6 +49,10 @@ const TOTAL_BEATS = SEQ_LEN * 2;
  * beat where the kaiju shows its intent, then an odd "resolve" beat
  * where the player's response lands. Eight ticks total per turn so
  * the encounter reads as call-and-response.
+ *
+ * Note: the value of 2 is baked into resolveTick's `tick >> 1` and
+ * `tick & 1` math. Changing this number would require reworking the
+ * dispatcher — it is not a generic knob.
  */
 const RESOLVE_BEATS_PER_STEP = 2;
 const RESOLVE_TOTAL_TICKS = SEQ_LEN * RESOLVE_BEATS_PER_STEP;
