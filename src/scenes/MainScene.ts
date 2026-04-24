@@ -36,6 +36,11 @@ import {
   comboDamageMultiplier,
   flooredWithCombo,
 } from "../config/combatJuice";
+import {
+  actionTheme,
+  THEME_TINT_ALPHA,
+  THEME_TINT_HEAVY,
+} from "../config/actionTheme";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 import { wallet, WalletManager } from "../web3/WalletManager";
 
@@ -182,33 +187,12 @@ const PAL = {
   miss: 0xff4444,
 } as const;
 
-/**
- * Per-button palette triples (on / hover / off) keyed by visual
- * theme. `default` drives ATTACK/GUARD/COOL; `special` paints the
- * SPECIAL button a dark red so the most dangerous action is also
- * visually tagged before the player even reads the label.
- */
-const BTN_PAL = {
-  default: {
-    on: 0x2a2f3e,
-    hover: 0x3a4f6e,
-    off: 0x181c24,
-  },
-  special: {
-    on: 0x6b1818,
-    hover: 0x8c2525,
-    off: 0x3c0d0d,
-  },
-} as const;
-
-type BtnPalette = (typeof BTN_PAL)[keyof typeof BTN_PAL];
-
 const ACT_COL: Record<ActionType, number> = {
-  [ActionType.ATTACK]: 0xff4444,
-  [ActionType.GUARD]: 0x4488ff,
-  [ActionType.COOL]: 0x44cccc,
-  [ActionType.SPECIAL]: 0xcc44ff,
-  [ActionType.IDLE]: 0x666666,
+  [ActionType.ATTACK]: actionTheme("ATTACK").color,
+  [ActionType.GUARD]: actionTheme("GUARD").color,
+  [ActionType.COOL]: actionTheme("COOL").color,
+  [ActionType.SPECIAL]: actionTheme("SPECIAL").color,
+  [ActionType.IDLE]: actionTheme("IDLE").color,
 };
 
 /** Neutral grey used to paint a masked kaiju slot of any origin. */
@@ -254,19 +238,6 @@ const ACT_KEY_HINT: Record<ActionType, string> = {
   [ActionType.GUARD]: "S / \u2193",
   [ActionType.COOL]: "D / \u2192",
   [ActionType.SPECIAL]: "W / \u2191",
-  [ActionType.IDLE]: "",
-};
-
-/**
- * Emoji glyph stamped in front of every action label for language-
- * independent recognition. Picked to read cleanly on both the
- * modern system-ui emoji set and Noto Emoji fallbacks.
- */
-const ACT_EMOJI: Record<ActionType, string> = {
-  [ActionType.ATTACK]: "\u2694\uFE0F", // crossed swords
-  [ActionType.GUARD]: "\uD83D\uDEE1\uFE0F", // shield
-  [ActionType.COOL]: "\u2744\uFE0F", // snowflake
-  [ActionType.SPECIAL]: "\u26A0\uFE0F", // warning sign
   [ActionType.IDLE]: "",
 };
 
@@ -358,11 +329,17 @@ const VFX = {
 // ======================== UI types ========================
 
 interface SlotUI {
-  bg: Phaser.GameObjects.Rectangle;
+  /** All slot visuals; scaled during RESOLUTION for active row. */
+  root: Phaser.GameObjects.Container;
+  underlay: Phaser.GameObjects.Rectangle;
+  /** Theme-tinted fill (per-action; alpha 0 = empty / idle). */
+  themeTint: Phaser.GameObjects.Rectangle;
   border: Phaser.GameObjects.Rectangle;
+  /** Large action glyph (sequencer + programmed slots). */
+  icon: Phaser.GameObjects.Text;
+  /** Secondary text (e.g. masked "[ ??? ]" or "OH!"). */
   label: Phaser.GameObjects.Text;
   labelZab: Phaser.GameObjects.Graphics;
-  labelStack: Phaser.GameObjects.Container;
 }
 
 interface BtnUI {
@@ -497,6 +474,15 @@ export class MainScene extends Phaser.Scene {
   private heatGaugeRestX = 0;
   private heatGaugeRestY = 0;
   private heatShakeTween?: Phaser.Tweens.Tween;
+  /** Dark panel behind kaiju HP track (with visible border). */
+  private kaijuHpBackPanel!: Phaser.GameObjects.Graphics;
+  /** Dark panel behind player HP track. */
+  private playerHpBackPanel!: Phaser.GameObjects.Graphics;
+  /** Dark panel behind heat bar. */
+  private heatBarBackPanel!: Phaser.GameObjects.Graphics;
+  /** PROGRAM phase: slow alpha pulse on next empty player slot. */
+  private nextInputSlotTween?: Phaser.Tweens.Tween;
+  private nextInputSlotIndex = -1;
 
   /* ---------- UI refs ---------- */
   /**
@@ -694,6 +680,7 @@ export class MainScene extends Phaser.Scene {
       this.stopResolutionSchedule();
       this.clearWaveCatharsisHandle();
       this.endEmergencyMode();
+      this.stopNextInputSlotHint();
     });
 
     // Browser autoplay policy: the AudioContext can only start after a
@@ -910,13 +897,19 @@ export class MainScene extends Phaser.Scene {
     this.kaijuBody = this.add
       .image(kx, cy, KAIJU_STATS.zako.texture)
       .setDisplaySize(sz, sz);
-    this.add
-      .rectangle(kx, cy - sz / 2 - barGap, this.barMaxW, barH, 0x222222)
-      .setOrigin(0.5);
+    const kaijuBarY = cy - sz / 2 - barGap;
+    this.kaijuHpBackPanel = this.add.graphics();
+    this.drawHpHeatGaugePanel(
+      this.kaijuHpBackPanel,
+      kx,
+      kaijuBarY,
+      this.barMaxW + 14,
+      barH + 10,
+    );
     this.kaijuHPBar = this.add
       .rectangle(
         kx - this.barMaxW / 2,
-        cy - sz / 2 - barGap,
+        kaijuBarY,
         this.barMaxW,
         barH,
         PAL.hpGreen,
@@ -926,10 +919,7 @@ export class MainScene extends Phaser.Scene {
     this.kaijuHPText = this.add
       .text(0, 0, " ", { ...this.hudLineTextStyle(13, "#44cc44", "800") })
       .setOrigin(0.5, 1);
-    this.add.container(kx, cy - sz / 2 - barGap - barH, [
-      this.kaijuHpZab,
-      this.kaijuHPText,
-    ]);
+    this.add.container(kx, kaijuBarY - barH, [this.kaijuHpZab, this.kaijuHPText]);
     this.kaijuLabelZab = this.add.graphics();
     this.kaijuLabel = this.add
       .text(0, 0, KAIJU_STATS.zako.label, {
@@ -955,9 +945,14 @@ export class MainScene extends Phaser.Scene {
 
     // HP bar (above the body)
     const hpBarY = cy - sz / 2 - barGap * 2;
-    this.add
-      .rectangle(px, hpBarY, this.barMaxW, barH, 0x222222)
-      .setOrigin(0.5);
+    this.playerHpBackPanel = this.add.graphics();
+    this.drawHpHeatGaugePanel(
+      this.playerHpBackPanel,
+      px,
+      hpBarY,
+      this.barMaxW + 14,
+      barH + 10,
+    );
     this.playerHPBar = this.add
       .rectangle(
         px - this.barMaxW / 2,
@@ -976,6 +971,14 @@ export class MainScene extends Phaser.Scene {
     // Heat gauge — wrapped in a container so the whole gauge can be
     // shaken as a unit when heat enters the danger zone.
     const heatBarY = cy - sz / 2 - barGap + 2;
+    this.heatBarBackPanel = this.add.graphics();
+    this.drawHpHeatGaugePanel(
+      this.heatBarBackPanel,
+      0,
+      0,
+      this.barMaxW + 16,
+      barH + 10,
+    );
     const heatBg = this.add
       .rectangle(-this.barMaxW / 2, 0, this.barMaxW, barH + 2, 0x1a1a1a)
       .setOrigin(0, 0.5);
@@ -991,6 +994,7 @@ export class MainScene extends Phaser.Scene {
       .setOrigin(0.5, 1);
 
     this.heatGaugeContainer = this.add.container(px, heatBarY, [
+      this.heatBarBackPanel,
       heatBg,
       this.playerHeatBar,
       this.heatLabelZab,
@@ -1069,11 +1073,28 @@ export class MainScene extends Phaser.Scene {
   }
 
   private makeSlot(x: number, y: number, sz: number): SlotUI {
-    const bg = this.add.rectangle(x, y, sz, sz, PAL.slotBg, 0.98);
-    const border = this.add.rectangle(x, y, sz, sz);
+    const root = this.add.container(x, y);
+    const underlay = this.add
+      .rectangle(0, 0, sz, sz, PAL.slotBg, 0.98)
+      .setOrigin(0.5);
+    const themeTint = this.add
+      .rectangle(0, 0, sz, sz, 0xffffff, 0)
+      .setOrigin(0.5);
+    themeTint.setAlpha(0);
+    const border = this.add.rectangle(0, 0, sz, sz);
     border.setFillStyle();
     border.setStrokeStyle(2, PAL.slotStroke);
     const labelZab = this.add.graphics();
+    const iconSize = Math.max(20, Math.floor(sz * 0.5));
+    const icon = this.add
+      .text(0, 0, "", {
+        font: `800 ${iconSize}px "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif`,
+        color: "#e6edf3",
+        stroke: "#000000",
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5)
+      .setVisible(false);
     const label = this.add
       .text(0, 0, "", {
         font: '800 13px system-ui, "Segoe UI", sans-serif',
@@ -1082,15 +1103,148 @@ export class MainScene extends Phaser.Scene {
         strokeThickness: HUD_STROKE_THICK,
         shadow: { ...HUD_SHADOW },
       })
-      .setOrigin(0.5);
-    const labelStack = this.add.container(x, y, [labelZab, label]);
-    const slot: SlotUI = { bg, border, label, labelZab, labelStack };
+      .setOrigin(0.5)
+      .setVisible(false);
+    // Border on top so thick RESOLUTION strokes read over the icon.
+    root.add([underlay, themeTint, labelZab, icon, label, border]);
+    const slot: SlotUI = {
+      root,
+      underlay,
+      themeTint,
+      border,
+      icon,
+      label,
+      labelZab,
+    };
     this.reflowSlotLabelZab(slot);
     return slot;
   }
 
+  /** Slightly oversized dark plate + stroke so HP / Heat never blend into the playfield. */
+  private drawHpHeatGaugePanel(
+    g: Phaser.GameObjects.Graphics,
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+  ): void {
+    g.clear();
+    const x = cx - w / 2;
+    const y = cy - h / 2;
+    g.fillStyle(0x08080c, 0.94);
+    g.fillRoundedRect(x, y, w, h, 5);
+    g.lineStyle(2, 0x5a6578, 0.95);
+    g.strokeRoundedRect(x, y, w, h, 5);
+  }
+
   private reflowSlotLabelZab(s: SlotUI): void {
+    if (!s.label.visible) {
+      s.labelZab.clear();
+      return;
+    }
     this.layoutZabutonBehindText(s.label, s.labelZab, 4, 0.55);
+  }
+
+  /** Action-button fills derived from the same theme colour as the sequencer. */
+  private buttonThemePalette(action: ActionType): {
+    on: number;
+    hover: number;
+    off: number;
+    stroke: number;
+  } {
+    const base = Phaser.Display.Color.ValueToColor(ACT_COL[action]);
+    return {
+      on: Phaser.Display.Color.GetColor(
+        Math.max(0, base.red - 55),
+        Math.max(0, base.green - 55),
+        Math.max(0, base.blue - 70),
+      ),
+      hover: Phaser.Display.Color.GetColor(
+        Math.max(0, base.red - 25),
+        Math.max(0, base.green - 25),
+        Math.max(0, base.blue - 30),
+      ),
+      off: Phaser.Display.Color.GetColor(
+        Math.max(0, base.red - 95),
+        Math.max(0, base.green - 95),
+        Math.max(0, base.blue - 105),
+      ),
+      stroke: ACT_COL[action],
+    };
+  }
+
+  private stopNextInputSlotHint(): void {
+    if (this.nextInputSlotTween) {
+      this.nextInputSlotTween.stop();
+      this.nextInputSlotTween = undefined;
+    }
+    if (this.nextInputSlotIndex >= 0 && this.pSlots[this.nextInputSlotIndex]?.root) {
+      this.pSlots[this.nextInputSlotIndex].root.setAlpha(1);
+    }
+    this.nextInputSlotIndex = -1;
+  }
+
+  /**
+   * PROGRAM phase: first empty player slot slowly blinks so the next
+   * commitment target is obvious (alpha 0.5 ↔ 1.0).
+   */
+  private refreshNextInputSlotHint(): void {
+    if (
+      this.phase !== GamePhase.RHYTHM_PLAYER ||
+      this.rhythmEnded ||
+      this.isRunTerminalPhase()
+    ) {
+      this.stopNextInputSlotHint();
+      return;
+    }
+    let next = -1;
+    for (let i = 0; i < SEQ_LEN; i++) {
+      if (this.playerSeq[i] === ActionType.IDLE) {
+        next = i;
+        break;
+      }
+    }
+    if (next < 0) {
+      this.stopNextInputSlotHint();
+      return;
+    }
+    if (next === this.nextInputSlotIndex && this.nextInputSlotTween) return;
+
+    this.stopNextInputSlotHint();
+    this.nextInputSlotIndex = next;
+    const r = this.pSlots[next].root;
+    r.setAlpha(1);
+    this.nextInputSlotTween = this.tweens.add({
+      targets: r,
+      alpha: { from: 0.5, to: 1 },
+      duration: 700,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
+  }
+
+  /**
+   * RESOLUTION: one row (kaiju + player) is the "current step": scale up,
+   * white ADD border; other rows dimmed.
+   */
+  private applyResolutionRowFocus(row: number): void {
+    for (let i = 0; i < SEQ_LEN; i++) {
+      const dim = i === row ? 1 : 0.3;
+      this.kSlots[i].root.setAlpha(dim);
+      this.pSlots[i].root.setAlpha(dim);
+      this.kSlots[i].root.setScale(i === row ? 1.15 : 1);
+      this.pSlots[i].root.setScale(i === row ? 1.15 : 1);
+      this.kSlots[i].border.setStrokeStyle(2, PAL.slotStroke, 1);
+      this.pSlots[i].border.setStrokeStyle(2, PAL.slotStroke, 1);
+      this.kSlots[i].border.setBlendMode(Phaser.BlendModes.NORMAL);
+      this.pSlots[i].border.setBlendMode(Phaser.BlendModes.NORMAL);
+    }
+    if (row < 0 || row >= SEQ_LEN) return;
+    for (const s of [this.kSlots[row], this.pSlots[row]]) {
+      s.border.setStrokeStyle(4, 0xffffff, 1);
+      s.border.setBlendMode(Phaser.BlendModes.ADD);
+    }
   }
 
   private buildRhythmIndicators(W: number, H: number): void {
@@ -1158,13 +1312,14 @@ export class MainScene extends Phaser.Scene {
       const bx = cursorX + bw / 2;
       cursorX += bw + gap;
 
-      const pal = this.buttonPalette(action);
+      const pal = this.buttonThemePalette(action);
       const bg = this.add
         .rectangle(0, 0, bw, bh, pal.on)
-        .setStrokeStyle(2, ACT_COL[action]);
+        .setStrokeStyle(2, pal.stroke, 1);
       const textZab = this.add.graphics();
+      const ic = actionTheme(action).icon;
       const lbl = this.add
-        .text(0, -9, `${ACT_EMOJI[action]} ${action}`, {
+        .text(0, -9, `${ic}  ${action}`, {
           font: '800 14px system-ui, "Segoe UI", sans-serif',
           color: "#e6edf3",
           stroke: "#000000",
@@ -1217,10 +1372,13 @@ export class MainScene extends Phaser.Scene {
           useHandCursor: true,
         })
         .on("pointerover", () => {
-          if (this.buttonsReady) bg.setFillStyle(pal.hover);
+          if (this.buttonsReady) bg.setFillStyle(pal.hover, 1);
         })
         .on("pointerout", () => {
-          bg.setFillStyle(this.buttonsReady ? pal.on : pal.off);
+          bg.setFillStyle(
+            this.buttonsReady ? pal.on : pal.off,
+            this.buttonsReady ? 1 : 0.5,
+          );
           this.releaseButtonTween(ctr);
         })
         .on("pointerdown", () => {
@@ -1263,15 +1421,6 @@ export class MainScene extends Phaser.Scene {
       [this.controlGuideZab, this.controlGuideText],
     );
     this.layoutControlGuideZab();
-  }
-
-  /**
-   * Palette triple used by a button in its on / hover / off states.
-   * SPECIAL picks the dark-red theme so the most dangerous action
-   * is also visually tagged before the player even reads the label.
-   */
-  private buttonPalette(action: ActionType): BtnPalette {
-    return action === ActionType.SPECIAL ? BTN_PAL.special : BTN_PAL.default;
   }
 
   /** Press-in tween: snap down to 85% quickly for a weighty feel. */
@@ -1330,13 +1479,16 @@ export class MainScene extends Phaser.Scene {
   private flashButtonForAction(action: ActionType): void {
     const btn = this.btns.find((b) => b.action === action);
     if (!btn) return;
-    const pal = this.buttonPalette(action);
-    btn.bg.setFillStyle(pal.hover);
+    const pal = this.buttonThemePalette(action);
+    btn.bg.setFillStyle(pal.hover, 1);
     // Run the same press/release tweens the pointer path uses so
     // keyboard input feels identical to touch input.
     this.pressButtonTween(btn.container);
     this.time.delayedCall(90, () => {
-      btn.bg.setFillStyle(this.buttonsReady ? pal.on : pal.off);
+      btn.bg.setFillStyle(
+        this.buttonsReady ? pal.on : pal.off,
+        this.buttonsReady ? 1 : 0.5,
+      );
       this.releaseButtonTween(btn.container);
     });
   }
@@ -2631,7 +2783,10 @@ export class MainScene extends Phaser.Scene {
     this.rhythmStartTime = this.time.now + lead;
     this.lastProcessedBeat = -1;
 
-    this.rhythmCursor.setPosition(this.kSlots[0].bg.x, this.kSlots[0].bg.y);
+    this.rhythmCursor.setPosition(
+      this.kSlots[0].root.x,
+      this.kSlots[0].root.y,
+    );
     this.refreshSequencerStepHighlight(-1);
 
     console.log(
@@ -2675,9 +2830,13 @@ export class MainScene extends Phaser.Scene {
       console.log(`[Rhythm] Slot ${pIdx} active`);
     }
     this.refreshSequencerStepHighlight(beat);
+    if (beat >= SEQ_LEN) {
+      this.refreshNextInputSlotHint();
+    }
   }
 
   private endRhythmSequence(): void {
+    this.stopNextInputSlotHint();
     this.refreshSequencerStepHighlight(-1);
     this.finalizeSlotInput(SEQ_LEN - 1);
     this.rhythmCursor.setVisible(false);
@@ -2708,16 +2867,25 @@ export class MainScene extends Phaser.Scene {
     // unmask the slot a beat before it lands so players can learn
     // from the outcome.
     const col = masked ? PAL_SAND_MASK : ACT_COL[action];
-    s.bg.setFillStyle(col, 0.5);
-    s.border.setStrokeStyle(2, col);
+    s.themeTint.setFillStyle(col, 1);
+    s.themeTint.setAlpha(THEME_TINT_ALPHA);
+    s.border.setStrokeStyle(2, col, 1);
     if (masked) {
-      s.label.setFontSize(KAIJU_NOISE_FONT_PX).setText(KAIJU_NOISE_TEXT);
+      s.icon.setVisible(false);
+      s.label
+        .setVisible(true)
+        .setFontSize(KAIJU_NOISE_FONT_PX)
+        .setText(KAIJU_NOISE_TEXT);
     } else {
-      s.label.setFontSize(KAIJU_SLOT_FONT_PX).setText(ACT_SHORT[action]);
+      s.label.setVisible(false);
+      s.icon
+        .setVisible(true)
+        .setText(actionTheme(action).icon);
     }
     this.reflowSlotLabelZab(s);
+    s.root.setAlpha(0);
     this.tweens.add({
-      targets: [s.bg, s.labelStack],
+      targets: s.root,
       alpha: { from: 0, to: 1 },
       duration: 180,
     });
@@ -2728,8 +2896,8 @@ export class MainScene extends Phaser.Scene {
     // locking onto the current beat with mechanical precision.
     this.tweens.add({
       targets: this.rhythmCursor,
-      x: slot.bg.x,
-      y: slot.bg.y,
+      x: slot.root.x,
+      y: slot.root.y,
       duration: 110,
       ease: "Expo.easeOut",
     });
@@ -2744,8 +2912,8 @@ export class MainScene extends Phaser.Scene {
 
   private startTimingBar(slot: SlotUI): void {
     this.tweens.killTweensOf(this.timingBar);
-    const x = slot.bg.x - this.slotSz / 2;
-    const y = slot.bg.y + this.slotSz / 2 - 2;
+    const x = slot.root.x - this.slotSz / 2;
+    const y = slot.root.y + this.slotSz / 2 - 2;
     this.timingBar.setPosition(x, y);
     this.timingBar.setScale(0, 1);
     this.timingBar.setVisible(true).setAlpha(0.8);
@@ -2763,13 +2931,21 @@ export class MainScene extends Phaser.Scene {
     if (this.playerSeq[idx] === ActionType.IDLE) {
       this.resetCombo();
       const s = this.pSlots[idx];
-      s.label.setText("MISS").setColor("#ff4444");
-      s.bg.setFillStyle(PAL.miss, 0.25);
+      s.icon.setVisible(false);
+      s.label
+        .setVisible(true)
+        .setText("MISS")
+        .setColor("#ff4444");
+      s.themeTint.setFillStyle(PAL.miss, 1);
+      s.themeTint.setAlpha(0.25);
       this.reflowSlotLabelZab(s);
 
       this.time.delayedCall(350, () => {
-        s.label.setText(ACT_SHORT[ActionType.IDLE]).setColor("#666666");
-        s.bg.setFillStyle(ACT_COL[ActionType.IDLE], 0.25);
+        s.label.setVisible(false);
+        s.icon.setText(actionTheme(ActionType.IDLE).icon).setVisible(true);
+        s.themeTint.setFillStyle(ACT_COL[ActionType.IDLE], 1);
+        s.themeTint.setAlpha(THEME_TINT_ALPHA);
+        s.border.setStrokeStyle(2, ACT_COL[ActionType.IDLE], 1);
         this.reflowSlotLabelZab(s);
       });
 
@@ -2818,6 +2994,7 @@ export class MainScene extends Phaser.Scene {
       this.showSlotInput(pIdx, action);
     }
 
+    this.refreshNextInputSlotHint();
     console.log(
       `[Rhythm] Slot ${pIdx}: ${action} (${timing}, ${offset.toFixed(0)}ms, centre=${beatCenterTime.toFixed(0)})`,
     );
@@ -2828,21 +3005,30 @@ export class MainScene extends Phaser.Scene {
     const q = this.rhythmInputQuality[pIdx] ?? "GOOD";
     this.rhythmInputQuality[pIdx] = null;
 
-    s.bg.setFillStyle(ACT_COL[action], 0.5);
+    s.label.setVisible(false);
+    s.icon.setVisible(true).setText(actionTheme(action).icon);
+    s.themeTint.setFillStyle(ACT_COL[action], 1);
+    s.themeTint.setAlpha(THEME_TINT_HEAVY);
     // Border snaps to pure white for the punch-in frame, then eases
     // back to the action-tinted stroke so the slot reads as "locked".
     s.border.setStrokeStyle(3, 0xffffff);
     this.time.delayedCall(160, () => {
-      s.border.setStrokeStyle(2, ACT_COL[action]);
+      s.border.setStrokeStyle(2, ACT_COL[action], 1);
     });
-    s.label.setText(ACT_SHORT[action]).setColor("#e6edf3");
     this.reflowSlotLabelZab(s);
 
     // Input bloom: PERFECT already has a gold burst; GOOD keeps a softer flash.
     if (q !== "PERFECT") {
       const fa = q === "GOOD" ? 0.38 : 0.9;
       const flash = this.add
-        .rectangle(s.bg.x, s.bg.y, s.bg.width, s.bg.height, 0xffffff, fa)
+        .rectangle(
+          s.root.x,
+          s.root.y,
+          this.slotSz,
+          this.slotSz,
+          0xffffff,
+          fa,
+        )
         .setBlendMode(Phaser.BlendModes.ADD)
         .setDepth(DEPTH.sparks);
       this.tweens.add({
@@ -2857,7 +3043,7 @@ export class MainScene extends Phaser.Scene {
     }
 
     this.tweens.add({
-      targets: s.bg,
+      targets: s.root,
       scaleX: { from: 0.8, to: 1 },
       scaleY: { from: 0.8, to: 1 },
       duration: 120,
@@ -2970,13 +3156,12 @@ export class MainScene extends Phaser.Scene {
     const stepIdx = tick >> 1;
     const isTelegraph = (tick & 1) === 0;
 
+    this.applyResolutionRowFocus(stepIdx);
     this.pulseBeat();
 
     if (isTelegraph) {
-      this.highlightStep(stepIdx, "kaiju");
       this.telegraphKaiju(stepIdx);
     } else {
-      this.highlightStep(stepIdx, "player");
       this.resolvePlayerStep(stepIdx);
     }
   }
@@ -2995,9 +3180,14 @@ export class MainScene extends Phaser.Scene {
     // learn from the outcome instead of staring at the "?" forever.
     if (this.kaijuNoiseMask[i] === true) {
       const s = this.kSlots[i];
-      s.bg.setFillStyle(ACT_COL[kAct], 0.5);
-      s.border.setStrokeStyle(2, ACT_COL[kAct]);
-      s.label.setFontSize(KAIJU_SLOT_FONT_PX).setText(ACT_SHORT[kAct]);
+      s.themeTint.setFillStyle(ACT_COL[kAct], 1);
+      s.themeTint.setAlpha(THEME_TINT_ALPHA);
+      s.border.setStrokeStyle(2, ACT_COL[kAct], 1);
+      s.label.setVisible(false);
+      s.icon
+        .setVisible(true)
+        .setText(actionTheme(kAct).icon);
+      s.icon.setFontSize(Math.max(20, Math.floor(this.slotSz * 0.5)));
       this.reflowSlotLabelZab(s);
     }
 
@@ -3058,8 +3248,10 @@ export class MainScene extends Phaser.Scene {
       console.log(`[Step ${i}] OVERHEAT streak=${this.ohStreak}`);
       pAct = ActionType.IDLE;
       const s = this.pSlots[i];
-      s.label.setText("OH!");
-      s.bg.setFillStyle(PAL.heatRed, 0.7);
+      s.icon.setVisible(false);
+      s.label.setVisible(true).setText("OH!").setColor("#ff6666");
+      s.label.setFontSize(14);
+      s.themeTint.setFillStyle(PAL.heatRed, 0.7);
       this.reflowSlotLabelZab(s);
       const isFirstOverheatInTurn = !this.ohAlarmedThisTurn;
       if (isFirstOverheatInTurn) {
@@ -3485,7 +3677,7 @@ export class MainScene extends Phaser.Scene {
    */
   private spawnOverheatSilencePunish(i: number): void {
     const s = this.pSlots[i];
-    if (!s?.bg) return;
+    if (!s?.root) return;
 
     const sm = this.add.particles(
       this.playerBody.x,
@@ -3508,7 +3700,7 @@ export class MainScene extends Phaser.Scene {
     this.time.delayedCall(1200, () => sm.destroy());
 
     const err = this.add
-      .text(s.bg.x, s.bg.y - this.slotSz * 0.55, "ERROR", {
+      .text(s.root.x, s.root.y - this.slotSz * 0.55, "ERROR", {
         fontFamily: FONT,
         fontSize: "15px",
         color: "#ff3333",
@@ -3537,7 +3729,8 @@ export class MainScene extends Phaser.Scene {
       });
     }
     this.time.delayedCall(1300, () => {
-      s.border.setStrokeStyle(2, PAL.heatRed, 0.8);
+      const col = ACT_COL[this.playerSeq[i] ?? ActionType.IDLE];
+      s.border.setStrokeStyle(2, col, 1);
     });
   }
 
@@ -3770,11 +3963,11 @@ export class MainScene extends Phaser.Scene {
     timing: RhythmInputTiming,
   ): void {
     const s = this.pSlots[pIdx];
-    if (!s?.bg) return;
+    if (!s?.root) return;
     this.rhythmInputVfx.spawnForTiming(
       timing,
-      s.bg.x,
-      s.bg.y,
+      s.root.x,
+      s.root.y,
       this.slotSz,
     );
   }
@@ -3827,56 +4020,37 @@ export class MainScene extends Phaser.Scene {
   }
 
   private clearSlots(): void {
+    this.stopNextInputSlotHint();
     const all = this.kSlots.concat(this.pSlots);
     for (const s of all) {
-      s.bg.setFillStyle(PAL.slotBg).setAlpha(1).setScale(1);
+      s.underlay.setFillStyle(PAL.slotBg, 0.98);
+      s.themeTint.setFillStyle(0xffffff, 0);
+      s.themeTint.setAlpha(0);
       s.border.setFillStyle();
-      s.border.setStrokeStyle(2, PAL.slotStroke);
-      s.border.setScale(1);
-      s.labelStack.setAlpha(1);
-      // Reset the label font: revealKaijuSlot may have shrunk it for
-      // a masked "[ ??? ]" render that is now being cleared.
+      s.border.setStrokeStyle(2, PAL.slotStroke, 1);
+      s.border.setBlendMode(Phaser.BlendModes.NORMAL);
+      s.root.setScale(1);
+      s.root.setAlpha(1);
+      s.icon.setText("").setVisible(false);
       s.label
         .setFontSize(KAIJU_SLOT_FONT_PX)
         .setText("")
+        .setVisible(false)
         .setAlpha(1)
         .setColor("#e6edf3");
       this.reflowSlotLabelZab(s);
     }
   }
 
-  /**
-   * Spotlight a resolution step. Dim every non-active slot, and put a
-   * gold stroke on whichever side is acting this beat — the kaiju on
-   * its telegraph beat, the player on the resolve beat. The inactive
-   * side keeps its default stroke so the two columns stay legible.
-   */
-  private highlightStep(idx: number, active: "kaiju" | "player"): void {
-    for (let i = 0; i < SEQ_LEN; i++) {
-      const a = i === idx ? 1 : 0.3;
-      this.kSlots[i].bg.setAlpha(a);
-      this.kSlots[i].labelStack.setAlpha(a);
-      this.pSlots[i].bg.setAlpha(a);
-      this.pSlots[i].labelStack.setAlpha(a);
-      this.kSlots[i].border.setStrokeStyle(2, PAL.slotStroke);
-      this.pSlots[i].border.setStrokeStyle(2, PAL.slotStroke);
-    }
-    if (active === "kaiju") {
-      this.kSlots[idx].border.setStrokeStyle(3, PAL.highlight);
-    } else {
-      this.pSlots[idx].border.setStrokeStyle(3, PAL.highlight);
-    }
-  }
-
   private enableButtons(on: boolean): void {
     for (const b of this.btns) {
-      const pal = this.buttonPalette(b.action);
+      const pal = this.buttonThemePalette(b.action);
       if (on) {
         b.container.setInteractive({ useHandCursor: true });
-        b.bg.setFillStyle(pal.on).setAlpha(1);
+        b.bg.setFillStyle(pal.on, 1);
       } else {
         b.container.disableInteractive();
-        b.bg.setFillStyle(pal.off).setAlpha(0.5);
+        b.bg.setFillStyle(pal.off, 0.5);
       }
     }
   }
