@@ -109,6 +109,11 @@ export class TitleScene extends Phaser.Scene {
     const W = this.scale.width;
     const H = this.scale.height;
 
+    // `engage()` sets this to true; the Scene instance is reused when we
+    // `scene.start("TitleScene")` after GAME OVER — must reset or all input
+    // handlers early-return forever.
+    this.starting = false;
+
     // Coming from `MainScene` (GAME OVER fade / handoff), a non‑1 time scale
     // or a half-finished camera fade can leave this scene inert. Normalise
     // before building UI so tweens, beat timer, and BGM schedule run.
@@ -149,6 +154,7 @@ export class TitleScene extends Phaser.Scene {
     this.beatTimer?.remove();
     audio.stopTitleBgm();
     this.bgmStarted = false;
+    this.starting = false;
     this.clearTitleKeyboard();
     this.input.off("pointerdown", this.focusCanvasOnPointer);
   }
