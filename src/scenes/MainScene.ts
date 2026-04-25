@@ -281,11 +281,20 @@ const ACTION_BUTTON_H = 58;
 const ACTION_BUTTON_ROW_GAP = 14;
 const ACTION_BUTTON_MIN_W = 120;
 const ACTION_BUTTON_MAX_W = 210;
+/** Relative to the row-fitted width, shrink each button to remove empty space. */
+const ACTION_BUTTON_WIDTH_SHRINK = 2 / 3;
+/** Do not go narrower than this after {@link ACTION_BUTTON_WIDTH_SHRINK} (touch target + "SPECIAL"). */
+const ACTION_BUTTON_MIN_W_AFTER_SHRINK = 100;
 /** Inner margin from the button edge; icon ring sits in the left column. */
 const ACTION_BUTTON_INNER_PAD = 8;
 /** Icon ring radius — must fit inside {@link ACTION_BUTTON_H}. */
 const ACTION_BUTTON_ICON_R = 20;
 const ACTION_BTN_ICON_GAP = 8;
+/**
+ * Nudge the whole icon + label column down so the group sits visually
+ * centered in the button (row was riding high in the 58px-tall bar).
+ */
+const ACTION_BUTTON_CONTENT_SHIFT_RATIO = 0.1;
 
 /**
  * Keyboard bindings for the four player actions. Strings here are
@@ -1263,9 +1272,25 @@ export class MainScene extends Phaser.Scene {
     this.layoutZabutonBehindText(s.label, s.labelZab, 4, 0.55);
   }
 
-  /** Call after any `setText` / `setFontSize` on a slot’s material icon. */
+  /**
+   * Call after any `setText` / `setFontSize` on a slot’s material icon.
+   * Classic Material Icons sit visually high inside the em box on canvas, so
+   * geometric (0,0) + origin 0.5 looks top-heavy; nudge Y down for optical center.
+   */
   private centerSlotActionIcon(icon: Phaser.GameObjects.Text): void {
-    icon.setPosition(0, 0).setOrigin(0.5, 0.5);
+    icon.setOrigin(0.5, 0.5);
+    let fontPx = 24;
+    const raw = icon.style?.fontSize;
+    if (raw != null) {
+      if (typeof raw === "number" && !Number.isNaN(raw)) {
+        fontPx = raw;
+      } else {
+        const m = /(\d+(?:\.\d+)?)/.exec(String(raw));
+        if (m) fontPx = parseFloat(m[1]);
+      }
+    }
+    const nudgeY = Math.max(2, Math.round(fontPx * 0.12));
+    icon.setPosition(0, nudgeY);
   }
 
   /** Cyan USER CONSOLE rim — subtle “live” pulse (kept off slot alpha). */
@@ -1435,12 +1460,16 @@ export class MainScene extends Phaser.Scene {
     const bh = ACTION_BUTTON_H;
     // Equal width for every action; row fits inside ~88% of the logical view.
     const rowAvail = W * 0.88;
-    const bw = Phaser.Math.Clamp(
+    let bw = Phaser.Math.Clamp(
       Math.floor(
         (rowAvail - (acts.length - 1) * gap) / Math.max(1, acts.length),
       ),
       ACTION_BUTTON_MIN_W,
       ACTION_BUTTON_MAX_W,
+    );
+    bw = Math.max(
+      ACTION_BUTTON_MIN_W_AFTER_SHRINK,
+      Math.floor(bw * ACTION_BUTTON_WIDTH_SHRINK),
     );
     // Horizontal pad stays small so neighbouring tap zones just touch
     // (no overlap → no ambiguity); vertical pad is generous so thumbs
@@ -1468,21 +1497,30 @@ export class MainScene extends Phaser.Scene {
         28,
         Math.max(20, Math.floor((r * 2 - 4) * 0.9)),
       );
-      const namePx = bw < 150 ? 12 : 15;
-      const nameStroke = bw < 150 ? 5 : 6;
+      const namePx = Phaser.Math.Clamp(Math.round(bw * 0.14), 14, 18);
+      const nameStroke = Math.max(5, Math.min(7, Math.round(namePx * 0.38)));
+      const keyPx = Phaser.Math.Clamp(Math.round(bw * 0.085), 10, 12);
+      const keyStroke = Math.max(4, Math.min(5, Math.round(keyPx * 0.42)));
+      const contentShiftY = Math.max(
+        3,
+        Math.round(bh * ACTION_BUTTON_CONTENT_SHIFT_RATIO),
+      );
+      const actionIconNudgeY = Math.max(2, Math.round(icPx * 0.12));
 
       const iconRing = this.add
         .circle(0, 0, r, 0x000000, 0)
         .setStrokeStyle(2, pal.stroke, 0.75)
-        .setPosition(cx, 0);
+        .setPosition(cx, contentShiftY);
       const iconText = this.add
         .text(0, 0, actionTheme(action).icon, {
           ...materialIconGlyphStyle(icPx, "#e6edf3", 2),
         })
         .setOrigin(0.5, 0.5)
-        .setPosition(cx, 0);
+        .setPosition(cx, contentShiftY + actionIconNudgeY);
+      const nameLineY = -11 + contentShiftY;
+      const keyLineY = 11 + contentShiftY;
       const nameTxt = this.add
-        .text(textLeft, -10, String(action), {
+        .text(textLeft, nameLineY, String(action), {
           font: `900 ${namePx}px system-ui, "Segoe UI", sans-serif`,
           color: "#e6edf3",
           stroke: "#000000",
@@ -1491,11 +1529,11 @@ export class MainScene extends Phaser.Scene {
         })
         .setOrigin(0, 0.5);
       const keyHint = this.add
-        .text(textLeft, 10, ACT_KEY_HINT[action], {
-          font: '800 9px system-ui, "Segoe UI", sans-serif',
+        .text(textLeft, keyLineY, ACT_KEY_HINT[action], {
+          font: `800 ${keyPx}px system-ui, "Segoe UI", sans-serif`,
           color: "#b0bac8",
           stroke: "#000000",
-          strokeThickness: 4,
+          strokeThickness: keyStroke,
           shadow: { ...HUD_SHADOW },
         })
         .setOrigin(0, 0.5);
