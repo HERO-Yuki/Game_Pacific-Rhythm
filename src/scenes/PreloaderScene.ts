@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { loadMaterialIconsFont } from "../utils/loadMaterialIconsFont";
 
 /**
  * Loads the static art assets used by the rest of the game.
@@ -25,6 +26,11 @@ export class PreloaderScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.scene.start("TitleScene");
+    // Material Icons must be ready before any Phaser Text caches PUA glyphs on
+    // the canvas; otherwise ligature names / tofu can stick until refresh.
+    const goTitle = (): void => {
+      this.scene.start("TitleScene");
+    };
+    void loadMaterialIconsFont(40).then(goTitle).catch(goTitle);
   }
 }

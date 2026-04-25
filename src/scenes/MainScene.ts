@@ -41,6 +41,11 @@ import {
   THEME_TINT_ALPHA,
   THEME_TINT_HEAVY,
 } from "../config/actionTheme";
+import {
+  MATERIAL_ICON_GLYPH,
+  materialIconGlyphStyle,
+} from "../config/materialIconCodepoints";
+import { loadMaterialIconsFont } from "../utils/loadMaterialIconsFont";
 import { notifyWavedashLoadComplete } from "../utils/wavedash";
 import { wallet, WalletManager } from "../web3/WalletManager";
 
@@ -79,6 +84,11 @@ export enum ActionType {
 }
 
 enum GamePhase {
+  /**
+   * `create()` → `resetState()` until `startRhythmSequence()` on wave 1.
+   * Keeps `updateRhythm()` idle while the first-wave READY overlay runs.
+   */
+  INTRO_READY,
   RHYTHM_KAIJU,
   RHYTHM_PLAYER,
   RESOLUTION,
@@ -128,6 +138,22 @@ const HITSTOP_MS = {
   special: 180,
   break: 90,
   vulnerable: 160,
+} as const;
+
+/**
+ * Micro squash-stretch on kaiju / player each beat so they read as
+ * moving with the metronome. Kept subtle so rank resize + pulseBeat
+ * never fight obvious silhouette reads.
+ */
+const RHYTHM_BODY_SQUASH = {
+  /** Horizontal stretch multiplier (applied on top of `baseScale`). */
+  stretchX: 1.05,
+  /** Vertical squash multiplier (slightly < 1). */
+  squashY: 0.93,
+  /** One leg of the tween (ms); yoyo doubles the return trip. */
+  halfMs: 100,
+  /** Player follows the kaiju by a few ms for a tiny call-and-response. */
+  playerDelayMs: 28,
 } as const;
 
 /**
@@ -421,7 +447,7 @@ export class MainScene extends Phaser.Scene {
   private currentKaijuRank: KaijuRank = "zako";
   private score = 0;
   private ohStreak = 0;
-  private phase = GamePhase.RHYTHM_KAIJU;
+  private phase = GamePhase.INTRO_READY;
   /**
    * Repeating `time.addEvent` for resolution ticks. Must be removed when
    * the round ends early (K.O. mid-resolve, final-wave clear) or stray
@@ -532,13 +558,16 @@ export class MainScene extends Phaser.Scene {
   private bossFinisherHint!: Phaser.GameObjects.Text;
   /** ADD-blend halo behind SPECIAL; pulses while a finisher is required. */
   private specialFinisherGlow!: Phaser.GameObjects.Rectangle;
+  private phaseIcon!: Phaser.GameObjects.Text;
   private phaseLabel!: Phaser.GameObjects.Text;
   private phaseZab!: Phaser.GameObjects.Graphics;
   private phaseHudContainer!: Phaser.GameObjects.Container;
-  /** 戦績: 💀 + 撃破数 + WAVE 行。パネル内で autoscale。 */
+  /** Score row: Material `skull` + kill count + WAVE line; panel autoscales. */
   private scoreHudPanel!: Phaser.GameObjects.Container;
   private scoreHudBg!: Phaser.GameObjects.Graphics;
-  private scoreKillsText!: Phaser.GameObjects.Text;
+  private scoreKillsRow!: Phaser.GameObjects.Container;
+  private scoreKillsGlyph!: Phaser.GameObjects.Text;
+  private scoreKillsNumber!: Phaser.GameObjects.Text;
   private scoreWaveText!: Phaser.GameObjects.Text;
   /** シーケンサー上 1–4 番 (K 列 / P 列) */
   private stepIndexK: StepIndexUI[] = [];
@@ -690,6 +719,7 @@ export class MainScene extends Phaser.Scene {
     this.input.keyboard?.once("keydown", unlock);
 
     notifyWavedashLoadComplete();
+    this.scheduleMaterialIconRasterRefresh();
     this.showReadyThenBeginWave();
   }
 
@@ -717,7 +747,7 @@ export class MainScene extends Phaser.Scene {
     this.clearWaveCatharsisHandle();
     this.runStartTime = 0;
     this.ohStreak = 0;
-    this.phase = GamePhase.RHYTHM_KAIJU;
+    this.phase = GamePhase.INTRO_READY;
     this.kaijuSeq = [];
     this.playerSeq = [];
     this.rhythmInputQuality = [null, null, null, null];
@@ -735,6 +765,7 @@ export class MainScene extends Phaser.Scene {
     this.walletBusy = false;
   }
 
+  /** True while the beat-count rhythm driver should advance the turn. */
   private isRhythmPhase(): boolean {
     return (
       this.phase === GamePhase.RHYTHM_KAIJU ||
@@ -788,6 +819,23 @@ export class MainScene extends Phaser.Scene {
     g.fillRoundedRect(x, y, w, h, ZABUTON_RADIUS);
   }
 
+  /** Rounded zabuton behind a known inner width/height (centred on origin). */
+  private layoutZabutonSizedRect(
+    g: Phaser.GameObjects.Graphics,
+    innerW: number,
+    innerH: number,
+    pad: number,
+    alpha: number = ZABUTON_ALPHA,
+  ): void {
+    const w = innerW + pad * 2;
+    const h = innerH + pad * 2;
+    const x = -w / 2;
+    const y = -h / 2;
+    g.clear();
+    g.fillStyle(0x000000, alpha);
+    g.fillRoundedRect(x, y, w, h, ZABUTON_RADIUS);
+  }
+
   private layoutWeatherZabBlock(): void {
     const pad = ZABUTON_PAD;
     const w =
@@ -820,15 +868,20 @@ export class MainScene extends Phaser.Scene {
     this.buildControlDeckBack(W, H);
 
     this.phaseZab = this.add.graphics();
+    this.phaseIcon = this.add
+      .text(0, 0, "", { ...materialIconGlyphStyle(22, "#8b949e", 2) })
+      .setOrigin(0.5, 0.5)
+      .setVisible(false);
     this.phaseLabel = this.add
       .text(0, 0, " ", { ...this.hudLineTextStyle(18, "#8b949e", "800") })
       .setOrigin(0.5, 0.5);
     this.phaseHudContainer = this.add
-      .container(W / 2, 20, [this.phaseZab, this.phaseLabel])
+      .container(W / 2, 20, [this.phaseZab, this.phaseIcon, this.phaseLabel])
       .setName("phaseHud");
     this.layoutZabutonBehindText(this.phaseLabel, this.phaseZab, ZABUTON_PAD);
     this.phaseZab.setDepth(1);
-    this.phaseLabel.setDepth(2);
+    this.phaseIcon.setDepth(2);
+    this.phaseLabel.setDepth(3);
     this.phaseLabel.setText("");
 
     this.buildScoreHud();
@@ -1088,10 +1141,11 @@ export class MainScene extends Phaser.Scene {
     const iconSize = Math.max(20, Math.floor(sz * 0.5));
     const icon = this.add
       .text(0, 0, "", {
-        font: `800 ${iconSize}px "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif`,
-        color: "#e6edf3",
-        stroke: "#000000",
-        strokeThickness: 4,
+        ...materialIconGlyphStyle(
+          iconSize,
+          "#e6edf3",
+          Math.max(2, Math.floor(iconSize * 0.1)),
+        ),
       })
       .setOrigin(0.5)
       .setVisible(false);
@@ -1318,15 +1372,23 @@ export class MainScene extends Phaser.Scene {
         .setStrokeStyle(2, pal.stroke, 1);
       const textZab = this.add.graphics();
       const ic = actionTheme(action).icon;
-      const lbl = this.add
-        .text(0, -9, `${ic}  ${action}`, {
+      const iconGlyph = this.add
+        .text(0, 0, ic, { ...materialIconGlyphStyle(20, "#e6edf3", 2) })
+        .setOrigin(0, 0.5);
+      const nameTxt = this.add
+        .text(0, 0, String(action), {
           font: '800 14px system-ui, "Segoe UI", sans-serif',
           color: "#e6edf3",
           stroke: "#000000",
           strokeThickness: HUD_STROKE_THICK,
           shadow: { ...HUD_SHADOW },
         })
-        .setOrigin(0.5);
+        .setOrigin(0, 0.5);
+      const labelGap = 8;
+      const labelRowW = iconGlyph.width + labelGap + nameTxt.width;
+      iconGlyph.setPosition(-labelRowW / 2, 0);
+      nameTxt.setPosition(iconGlyph.x + iconGlyph.width + labelGap, 0);
+      const lbl = this.add.container(0, -9, [iconGlyph, nameTxt]);
       const keyHint = this.add
         .text(0, 13, ACT_KEY_HINT[action], {
           font: '800 10px system-ui, "Segoe UI", sans-serif',
@@ -1336,8 +1398,9 @@ export class MainScene extends Phaser.Scene {
           shadow: { ...HUD_SHADOW },
         })
         .setOrigin(0.5);
-      const th = lbl.height + 6 + keyHint.height;
-      const tw = Math.max(lbl.width, keyHint.width) + 10;
+      const labelRowH = Math.max(iconGlyph.height, nameTxt.height);
+      const th = labelRowH + 6 + keyHint.height;
+      const tw = Math.max(labelRowW, keyHint.width) + 10;
       const zx = -tw / 2;
       const zy = -th / 2;
       textZab.fillStyle(0x000000, ZABUTON_ALPHA);
@@ -2044,12 +2107,11 @@ export class MainScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(d + 2);
 
-    const stars = "★ ★ ★";
+    const starGlyph = MATERIAL_ICON_GLYPH.star;
+    const stars = `${starGlyph}  ${starGlyph}  ${starGlyph}`;
     const row = this.add
       .text(cx, cy + 110, stars, {
-        fontFamily: FONT,
-        fontSize: "22px",
-        color: "#ffd24a",
+        ...materialIconGlyphStyle(22, "#ffd24a", 1),
       })
       .setOrigin(0.5)
       .setDepth(d + 2)
@@ -2141,6 +2203,42 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
+   * Canvas text can cache the wrong bitmap if "Material Icons" is not ready
+   * on the first `updateText()` pass. Re-run after `document.fonts` settles.
+   */
+  private scheduleMaterialIconRasterRefresh(): void {
+    const bump = (): void => {
+      if (!this.scene.isActive()) return;
+      this.refreshMaterialIconTexts();
+    };
+    void loadMaterialIconsFont(40).then(bump).catch(bump);
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      void document.fonts.ready.then(bump).catch(bump);
+    }
+    this.time.delayedCall(0, bump);
+  }
+
+  /** Depth-first walk: refresh any Text whose style uses Material Icons. */
+  private refreshMaterialIconTexts(): void {
+    const visit = (go: Phaser.GameObjects.GameObject): void => {
+      if (go instanceof Phaser.GameObjects.Text) {
+        const fam = go.style.fontFamily ?? "";
+        if (fam.includes("Material Icons")) {
+          go.updateText();
+        }
+      }
+      if (go instanceof Phaser.GameObjects.Container) {
+        go.iterate((child: Phaser.GameObjects.GameObject) => {
+          visit(child);
+        });
+      }
+    };
+    this.children.each((child: Phaser.GameObjects.GameObject) => {
+      visit(child);
+    });
+  }
+
+  /**
    * Re-snapshot a tracked object's baseline scale after we mutate it
    * (e.g., kaiju resize between ranks). No-op if the object was never
    * cached as a bounce target.
@@ -2180,8 +2278,8 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
-   * 右上: 💀 撃破数 (金) + WAVE 行。矩形の内側幅の 80% を超えたら `fontSize` 縮小。
-   * 黒の半透明 Rounded 座布団。
+   * Top-right: Material `skull` + kill count (gold) + WAVE line; autoscale when
+   * the row exceeds ~80% of the panel inner width.
    */
   private buildScoreHud(): void {
     const padX = 12;
@@ -2193,11 +2291,22 @@ export class MainScene extends Phaser.Scene {
     this.scoreHudBg = this.add.graphics();
     this.scoreHudBg.setName("scoreHudZab");
 
-    this.scoreKillsText = this.add
-      .text(-padX, padY, "\uD83D\uDC80 0", {
+    this.scoreKillsNumber = this.add
+      .text(0, 0, "0", {
         ...this.hudLineTextStyle(17, SCORE_GOLD, "900"),
       })
       .setOrigin(1, 0);
+    this.scoreKillsGlyph = this.add
+      .text(0, 0, MATERIAL_ICON_GLYPH.scoreKills, {
+        ...materialIconGlyphStyle(19, SCORE_GOLD, 2),
+      })
+      .setOrigin(1, 0);
+    const killGap = 6;
+    this.scoreKillsRow = this.add.container(-padX, padY, [
+      this.scoreKillsGlyph,
+      this.scoreKillsNumber,
+    ]);
+    this.layoutScoreKillsGlyphX(killGap);
 
     this.scoreWaveText = this.add
       .text(-padX, padY + 20, "WAVE", {
@@ -2207,13 +2316,21 @@ export class MainScene extends Phaser.Scene {
 
     this.scoreHudPanel.add([
       this.scoreHudBg,
-      this.scoreKillsText,
+      this.scoreKillsRow,
       this.scoreWaveText,
     ]);
   }
 
+  /** Keeps the skull glyph tucked left of the numeric score (right-aligned row). */
+  private layoutScoreKillsGlyphX(gap: number): void {
+    this.scoreKillsGlyph.setPosition(
+      -this.scoreKillsNumber.width - gap,
+      0,
+    );
+  }
+
   private layoutScoreHud(): void {
-    if (!this.scoreKillsText?.active || !this.scoreWaveText?.active) return;
+    if (!this.scoreKillsRow?.active || !this.scoreWaveText?.active) return;
 
     const W = this.scale.width;
     this.scoreHudPanel.setX(W - 16);
@@ -2222,11 +2339,13 @@ export class MainScene extends Phaser.Scene {
     const padX = 12;
     const padY = 8;
 
-    this.scoreKillsText.setText(`\uD83D\uDC80 ${this.score}`);
+    const killGap = 6;
+    this.scoreKillsNumber.setText(String(this.score));
+    this.layoutScoreKillsGlyphX(killGap);
 
     let kfs = 17;
     const setKillStyle = (fs: number): void => {
-      this.scoreKillsText.setStyle({
+      this.scoreKillsNumber.setStyle({
         font: `900 ${fs}px system-ui, "Segoe UI", sans-serif`,
         color: SCORE_GOLD,
         stroke: "#000000",
@@ -2234,7 +2353,14 @@ export class MainScene extends Phaser.Scene {
         shadow: { ...HUD_SHADOW },
       });
     };
+    const setGlyphStyle = (fs: number): void => {
+      this.scoreKillsGlyph.setStyle({
+        ...materialIconGlyphStyle(fs, SCORE_GOLD, Math.max(1, Math.floor(fs * 0.1))),
+      });
+    };
     setKillStyle(kfs);
+    setGlyphStyle(Math.round(kfs * 1.08));
+    this.layoutScoreKillsGlyphX(killGap);
 
     const cap = this.maxWave;
     if (cap === Infinity) {
@@ -2255,17 +2381,28 @@ export class MainScene extends Phaser.Scene {
     let wfs = 12;
     setWaveStyle(wfs);
 
+    const killRowW0 =
+      this.scoreKillsGlyph.width + killGap + this.scoreKillsNumber.width;
     const bodyW = Math.min(
       maxPanelW,
-      Math.max(this.scoreKillsText.width, this.scoreWaveText.width) + padX * 2,
+      Math.max(killRowW0, this.scoreWaveText.width) + padX * 2,
     );
     const bodyH =
-      padY * 2 + this.scoreKillsText.height + 4 + this.scoreWaveText.height;
+      padY * 2 +
+      Math.max(this.scoreKillsGlyph.height, this.scoreKillsNumber.height) +
+      4 +
+      this.scoreWaveText.height;
     const innerMax = bodyW * 0.8;
 
-    while (this.scoreKillsText.width > innerMax && kfs > 8) {
+    let killRowW =
+      this.scoreKillsGlyph.width + killGap + this.scoreKillsNumber.width;
+    while (killRowW > innerMax && kfs > 8) {
       kfs -= 1;
       setKillStyle(kfs);
+      setGlyphStyle(Math.round(kfs * 1.08));
+      this.layoutScoreKillsGlyphX(killGap);
+      killRowW =
+        this.scoreKillsGlyph.width + killGap + this.scoreKillsNumber.width;
     }
     while (this.scoreWaveText.width > innerMax && wfs > 7) {
       wfs -= 1;
@@ -2426,8 +2563,9 @@ export class MainScene extends Phaser.Scene {
 
   /**
    * Wave 1 開始前に "READY" を 2 拍分表示してプレイヤーに準備の猶予を与える。
-   * READY が消えた瞬間に beginWave() へ移行するので最初の相手ターンは
-   * プレイヤーが画面を見てから始まる。
+   * この間は `GamePhase.INTRO_READY` のため `updateRhythm()` は走らない。
+   * READY が消えたあと `beginWave()` → `startRhythmSequence()` で初めて
+   * 相手ターン（リズム）が始まる。
    */
   private showReadyThenBeginWave(): void {
     const W = this.scale.width;
@@ -2767,7 +2905,7 @@ export class MainScene extends Phaser.Scene {
   private startRhythmSequence(leadInMs?: number): void {
     const lead = leadInMs ?? this.rhythmMs;
     this.phase = GamePhase.RHYTHM_KAIJU;
-    this.setPhaseDisplay("\u266a READING", "#ffcc00");
+    this.setPhaseDisplay("READING", "#ffcc00", MATERIAL_ICON_GLYPH.phaseReading);
     this.clearSlots();
     this.enableButtons(false);
     this.buttonsReady = false;
@@ -2812,7 +2950,11 @@ export class MainScene extends Phaser.Scene {
 
       if (beat === SEQ_LEN) {
         this.phase = GamePhase.RHYTHM_PLAYER;
-        this.setPhaseDisplay("\u266a PROGRAM", "#44cc88");
+        this.setPhaseDisplay(
+          "PROGRAM",
+          "#44cc88",
+          MATERIAL_ICON_GLYPH.phaseProgram,
+        );
         if (!this.buttonsReady) {
           this.buttonsReady = true;
           this.enableButtons(true);
@@ -3069,14 +3211,28 @@ export class MainScene extends Phaser.Scene {
     });
 
     for (const { obj, baseScale } of this.bounceTargets) {
-      this.tweens.add({
-        targets: obj,
-        scaleX: baseScale * 1.05,
-        scaleY: baseScale * 1.05,
-        duration: 80,
-        yoyo: true,
-        ease: "Sine.easeOut",
-      });
+      if (obj === this.kaijuBody || obj === this.playerBody) {
+        const delay =
+          obj === this.playerBody ? RHYTHM_BODY_SQUASH.playerDelayMs : 0;
+        this.tweens.add({
+          targets: obj,
+          scaleX: baseScale * RHYTHM_BODY_SQUASH.stretchX,
+          scaleY: baseScale * RHYTHM_BODY_SQUASH.squashY,
+          duration: RHYTHM_BODY_SQUASH.halfMs,
+          delay,
+          yoyo: true,
+          ease: "Sine.easeInOut",
+        });
+      } else {
+        this.tweens.add({
+          targets: obj,
+          scaleX: baseScale * 1.05,
+          scaleY: baseScale * 1.05,
+          duration: 80,
+          yoyo: true,
+          ease: "Sine.easeOut",
+        });
+      }
     }
   }
 
@@ -3122,7 +3278,11 @@ export class MainScene extends Phaser.Scene {
   private startResolve(): void {
     this.stopResolutionSchedule();
     this.phase = GamePhase.RESOLUTION;
-    this.setPhaseDisplay("\u2694 RESOLUTION", "#ff6644");
+    this.setPhaseDisplay(
+      "RESOLUTION",
+      "#ff6644",
+      MATERIAL_ICON_GLYPH.phaseResolve,
+    );
     console.log(
       "[Resolve] K:",
       this.kaijuSeq.join(" "),
@@ -4003,13 +4163,37 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  private setPhaseDisplay(text: string, color: string): void {
-    this.phaseLabel.setText(text).setColor(color);
-    this.layoutZabutonBehindText(
-      this.phaseLabel,
-      this.phaseZab,
-      ZABUTON_PAD,
-    );
+  /**
+   * @param materialIcon — When set, a single Material Icons PUA character
+   *   (see `materialIconCodepoints.ts`) beside the label. Omit for GAME OVER / CLEAR.
+   */
+  private setPhaseDisplay(
+    label: string,
+    color: string,
+    materialIcon?: string,
+  ): void {
+    if (materialIcon) {
+      this.phaseIcon.setVisible(true);
+      this.phaseIcon.setText(materialIcon);
+      const iconPx = 26;
+      this.phaseIcon.setStyle({ ...materialIconGlyphStyle(iconPx, color, 2) });
+      this.phaseLabel.setStyle({ ...this.hudLineTextStyle(18, color, "800") });
+      this.phaseLabel.setText(label);
+      const gap = 8;
+      const tw = this.phaseIcon.width + gap + this.phaseLabel.width;
+      const mh = Math.max(this.phaseIcon.height, this.phaseLabel.height);
+      this.phaseIcon.setOrigin(0, 0.5).setPosition(-tw / 2, 0);
+      this.phaseLabel
+        .setOrigin(0, 0.5)
+        .setPosition(this.phaseIcon.x + this.phaseIcon.width + gap, 0);
+      this.layoutZabutonSizedRect(this.phaseZab, tw, mh, ZABUTON_PAD);
+    } else {
+      this.phaseIcon.setVisible(false);
+      this.phaseLabel.setText(label);
+      this.phaseLabel.setStyle({ ...this.hudLineTextStyle(18, color, "800") });
+      this.phaseLabel.setOrigin(0.5, 0.5).setPosition(0, 0);
+      this.layoutZabutonBehindText(this.phaseLabel, this.phaseZab, ZABUTON_PAD);
+    }
     this.tweens.add({
       targets: this.phaseHudContainer,
       scaleX: { from: 1.2, to: 1 },

@@ -44,7 +44,7 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 
 - **Fully responsive canvas** — `Phaser.Scale.FIT` + `Phaser.Scale.CENTER_BOTH` on a fixed 960×540 design. The Scale Manager letterboxes into the host iframe on any aspect ratio; gameplay math always sees the same logical coordinates.
 - **Touch-first UX** — action buttons have dynamic widths (ATTACK 200 px / GUARD-COOL 150 px / SPECIAL 100 px) and extended hit-zones that reach ~6 px horizontally / ~20 px vertically past the visible rectangle so panicked thumbs still land.
-- **Zero long-form text** — no dialogue boxes, no multi-screen tutorials. The four actions are colour-coded + emoji-prefixed (`⚔️ ATTACK`, `🛡️ GUARD`, `❄️ COOL`, `⚠️ SPECIAL`) so the iconography reads in any language. First-time players meet a `CLEAR` Phase 1 (no weather, no fog-of-war) before the game starts layering modifiers.
+- **Zero long-form text** — no dialogue boxes, no multi-screen tutorials. The four actions are colour-coded and prefixed with **Material Icons** PUA glyphs (see [`src/config/materialIconCodepoints.ts`](src/config/materialIconCodepoints.ts) + [`src/config/actionTheme.ts`](src/config/actionTheme.ts)) so the iconography reads in any language without relying on emoji in Canvas. First-time players meet a `CLEAR` Phase 1 (no weather, no fog-of-war) before the game starts layering modifiers.
 - **Embedding hygiene** — `viewport-fit=cover`, `safe-area-inset-*` padding, `overflow: hidden` on `html, body`, arrow keys captured via `kb.addCapture` so the host page never scrolls. See the "Responsive canvas" section below for the full list.
 
 ### Deploy to Wavedash
@@ -96,7 +96,7 @@ EASY and NORMAL set explicit **`maxWaves`** in [`src/config/difficulty.ts`](src/
 
 ENDLESS **runaway tempo**: at the start of each wave, `MainScene` sets `rhythmMs` / `resolveMs` via `beatMsForEndlessWave(wave)` so reading, programming, and resolution all track the same accelerating clock. Phase boundaries match weather (`phaseIndexForWave`).
 
-The in-run **skull / score** total includes +1 per wave cleared plus a **PERFECT BONUS** of **(PERFECT count this wave) × 100** applied when the kill is registered, after a short all-stop beat (see “Juice & combo” in architecture). The game does not persist a local best; Web3 `personal_sign` is optional for a one-off attestation on GAME OVER.
+The in-run **kill tally** (Material `dangerous` glyph + numeric score) includes +1 per wave cleared plus a **PERFECT BONUS** of **(PERFECT count this wave) × 100** applied when the kill is registered, after a short all-stop beat (see “Juice & combo” in architecture). The game does not persist a local best; Web3 `personal_sign` is optional for a one-off attestation on GAME OVER.
 
 ### Input timing
 
@@ -108,12 +108,12 @@ You can mix and match input devices at any time — every scheme routes through 
 
 | Action | Button | Width | Base colour | Keyboard (left hand) | Keyboard (right hand) |
 | --- | --- | --- | --- | --- | --- |
-| ATTACK  | ⚔️ ATTACK  | 200 px | dark slate   | **A** | **←** |
-| GUARD   | 🛡️ GUARD   | 150 px | dark slate   | **S** | **↓** |
-| COOL    | ❄️ COOL    | 150 px | dark slate   | **D** | **→** |
-| SPECIAL | ⚠️ SPECIAL | 100 px | **dark red** | **W** | **↑** |
+| ATTACK  | (icon) ATTACK  | 200 px | dark slate   | **A** | **←** |
+| GUARD   | (icon) GUARD   | 150 px | dark slate   | **S** | **↓** |
+| COOL    | (icon) COOL    | 150 px | dark slate   | **D** | **→** |
+| SPECIAL | (icon) SPECIAL | 100 px | **dark red** | **W** | **↑** |
 
-The button footprints encode a risk/importance hierarchy: ATTACK is the biggest so the bread-and-butter move is the easiest to mash, GUARD and COOL are mid-sized reactive options, and SPECIAL is small and painted a warning red so panicked thumbs don't mis-fire the overheat-bomb move. Emojis in front of the label keep the iconography language-independent.
+The button footprints encode a risk/importance hierarchy: ATTACK is the biggest so the bread-and-butter move is the easiest to mash, GUARD and COOL are mid-sized reactive options, and SPECIAL is small and painted a warning red so panicked thumbs don't mis-fire the overheat-bomb move. Each row uses a separate `Text` for the Material glyph and for the English label so Canvas never has to resolve icon-font ligatures by name.
 
 Every press runs a press-in / bounce-back tween — the container scales to 85 % on pointerdown with `Cubic.easeIn`, then overshoots back to 1.0 with `Back.easeOut` — so touch and keyboard input both feel like heavy mechanical switches. Key hints sit underneath each label for discoverability, and touch hit-zones extend ~6 px horizontally / ~20 px vertically past the visible rectangle for thumb-friendly taps on mobile. Arrow keys are captured so the embedding page never scrolls while the game has focus.
 
@@ -173,10 +173,10 @@ The net effect: AI tools let us spend our 10 days on the _interesting_ work — 
 ### Phases
 
 ```
-RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER)
+INTRO_READY → RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER)
 ```
 
-`GAME_CLEAR` fires when the wave counter reaches the difficulty cap (**EASY 9** / **NORMAL 15**); a short celebration overlay then returns to the title. ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
+`INTRO_READY` covers the first-wave **READY** overlay only: the rhythm driver stays idle until `beginWave()` arms the clock. `GAME_CLEAR` fires when the wave counter reaches the difficulty cap (**EASY 9** / **NORMAL 15**); a short celebration overlay then returns to the title. ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
 
 ### ENDLESS tempo
 
@@ -194,6 +194,7 @@ RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER
 - **Player input** does not use a separate `Math.round(beatFloat)` path: `onActionClick` calls `resolvePlayerRhythmInput` so window membership and **PERFECT** / **GOOD** both use the **same** offset from the **intended** centre of the closest valid slot.
 - One-beat lead-in before the first beat fires
 - Buttons are enabled ±200 ms before the first player beat (early input support)
+- **Beat juice** — on each metronome hit, kaiju and player portraits get a subtle vertical squash + horizontal stretch (`RHYTHM_BODY_SQUASH` in `MainScene`) so the duelists read as moving with the tempo; HUD elements keep a lighter uniform pulse.
 
 ### Kaiju ranks
 
