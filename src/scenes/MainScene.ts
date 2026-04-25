@@ -891,6 +891,9 @@ export class MainScene extends Phaser.Scene {
     this.heatDangerActive = false;
     this.scoreSubmitted = false;
     this.walletBusy = false;
+    // Must clear: `beginHandoffRetryFromGameOver` sets this true before
+    // `scene.restart`; without a reset, BACK TO TITLE no-ops on the next GO.
+    this.resultScreenNavInProgress = false;
   }
 
   /** True while the beat-count rhythm driver should advance the turn. */
