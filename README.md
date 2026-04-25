@@ -3,14 +3,14 @@
 > **A Gamedev.js Jam 2026 entry — theme "Machines!"**
 > Pilot a giant combat mech, read the kaiju's attack program, and counter-program your response in time with the beat.
 
-[![Play on itch.io](https://img.shields.io/badge/Play-itch.io-fa5c5c?style=for-the-badge)](#)
-[![Play on Wavedash](https://img.shields.io/badge/Play-Wavedash-0ea5e9?style=for-the-badge)](#)
+[![Play on itch.io](https://img.shields.io/badge/Play-itch.io-fa5c5c?style=for-the-badge)](https://hero-yuki.itch.io/pacific-rhythm)
+[![Play on Wavedash](https://img.shields.io/badge/Play-Wavedash-0ea5e9?style=for-the-badge)](https://wavedash.com/games/pacific-rhythm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Phaser](https://img.shields.io/badge/Phaser-3.88-8A2BE2?style=for-the-badge)](https://phaser.io/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?style=for-the-badge)](https://www.typescriptlang.org/)
 
-- **Play on itch.io:** [Play on itch.io](#) _(coming soon)_
-- **Play on Wavedash:** [Play on Wavedash](#) _(coming soon)_
+- **Play on itch.io:** [Pacific Rhythm on itch.io](https://hero-yuki.itch.io/pacific-rhythm) — HTML5, playable in the browser
+- **Play on Wavedash:** [Pacific Rhythm on Wavedash](https://wavedash.com/games/pacific-rhythm) — playable in the browser
 - **Source:** this repository — MIT licensed, 100% open source
 
 ---
@@ -352,6 +352,8 @@ public/
 ---
 
 ## Wavedash deployment
+
+**Live build:** the game is playable on Wavedash at [wavedash.com/games/pacific-rhythm](https://wavedash.com/games/pacific-rhythm).
 
 1. Create a game on [wavedash.com](https://wavedash.com/) and copy the **game id**.
 2. Put it in `wavedash.toml` and `wavedash.json` (both point at the same id; the TOML is consumed by the CLI, the JSON mirrors it for CI / docs).
