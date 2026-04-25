@@ -17,9 +17,6 @@ export const EMERGENCY = {
   HP_THRESHOLD: 30,
   /** WebGL / canvas key for the radial red/black overlay. */
   VIGNETTE_TEXTURE_KEY: "emergency_radial_vignette",
-  BANNER_TEXT: "EMERGENCY: COOLING SYSTEM BYPASS ACTIVE",
-  /** y = H * BANNER_Y_RATIO */
-  BANNER_Y_RATIO: 0.08,
   VIG_PULSE: {
     /** Half-period of the alpha yoyo (ms); full cycle ≈ 1 s. */
     duration: 500,
@@ -29,6 +26,32 @@ export const EMERGENCY = {
   RED_GLITCH: {
     intervalMs: 70,
     alpha: { min: 0.04, max: 0.14 },
+  },
+} as const;
+
+/** Procedural static bed in `AudioManager` — mixed in only when player HP is low. */
+export const BATTLE_NOISE = {
+  /**
+   * Full HP / max above this → bed silent. Below → wet increases linearly
+   * toward max at 0 HP (same curve as “HPが減ってきたら”).
+   */
+  HP_FRACTION_START: 0.5,
+  /** Max gain into master for the looped noise — kept low; was 0.82, halved for subtler bed. */
+  MAX_WET: 0.41,
+  /** `GainNode` fade when wet returns to 0 (HP up) or on `stopBattleNoise()`. */
+  WET_FADE_OUT_S: 0.2,
+  /** Ramping in when the bed becomes audible from HP loss. */
+  WET_RAMP_IN_S: 0.12,
+  /** `setTimeout` after fade before disconnecting the wet bus. */
+  TEARDOWN_MS: 400,
+  /** Dark + air static layers in `startNoiseBed` (after filters). */
+  BED: {
+    DARK_BASE: 0.034,
+    DARK_LFO_HZ: 0.15,
+    DARK_LFO_DEPTH: 0.011,
+    AIR_BASE: 0.012,
+    AIR_LFO_HZ: 0.09,
+    AIR_LFO_DEPTH: 0.0055,
   },
 } as const;
 

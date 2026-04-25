@@ -29,6 +29,14 @@ export const MATERIAL_ICON_GLYPH = {
   phaseResolve: "\u{e90e}",
   /** star — rating row on GAME CLEAR (avoids Unicode star + wrong font). */
   star: "\u{e838}",
+  /** wb_sunny — clear weather, no extra modifiers. */
+  weatherClear: "\u{e430}",
+  /** snowing — snow phase (ATK nerf, extra COOL). */
+  weatherSnow: "\u{e80f}",
+  /** terrain — sand: hidden slot / ground-hazard mood. */
+  weatherSand: "\u{e564}",
+  /** local_fire_department — drought: extra heat build-up. */
+  weatherDrought: "\u{ef55}",
 } as const;
 
 /** Phaser `Text` style: must pair with {@link MATERIAL_ICON_GLYPH} characters. */

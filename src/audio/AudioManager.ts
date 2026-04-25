@@ -33,7 +33,15 @@ import {
   TITLE_BGM_SUB_HZ,
   TITLE_BGM_SUSTAIN_STOP_MS,
   TITLE_BGM_TICK_MS,
+  COMBAT_BGM_BOSS_TRANSPOSE_SEMITONES,
+  COMBAT_BGM_BUS_PEAK,
+  COMBAT_BGM_DRONE_PITCH_RAMP_S,
+  COMBAT_BGM_FADE_IN_S,
+  COMBAT_BGM_FADE_OUT_S,
+  COMBAT_BGM_SUSTAIN_STOP_MS,
 } from "./titleBgmConfig";
+import type { KaijuRank } from "../config/enemies";
+import { BATTLE_NOISE } from "../config/rhythmAndEmergency";
 
 export interface PlayOptions {
   /** Stereo pan from -1 (left) to +1 (right). Omit for centred. */
@@ -73,8 +81,28 @@ export class AudioManager {
   private bgmTimer: ReturnType<typeof setInterval> | null = null;
   /** Sustains: drones, noise bed, modulators (anything we must stop on fade-out). */
   private bgmSustainNodes: (OscillatorNode | AudioBufferSourceNode)[] = [];
-  /** Slightly longer looped noise for title BGM to reduce seam in the static bed. */
-  private titleNoiseBuffer: AudioBuffer | null = null;
+  /** Longer looped white-noise buffer (shared by battle static bed). */
+  private loopNoiseBuffer: AudioBuffer | null = null;
+
+  /** Looped static + LFOs for low-HP tension (independent of title BGM). */
+  private battleNoiseWet: GainNode | null = null;
+  private battleNoiseSustain: (OscillatorNode | AudioBufferSourceNode)[] = [];
+
+  // ----- In-combat procedural BGM (same engine as title; rank-based transpose) -----
+  private combatBgmActive = false;
+  private combatBgmGain: GainNode | null = null;
+  private combatBgmTimer: ReturnType<typeof setInterval> | null = null;
+  private combatBgmBeatIndex = 0;
+  private combatBgmPatternCount = 0;
+  private combatBgmNextBeatTime = 0;
+  private combatBgmSustain: (OscillatorNode | AudioBufferSourceNode)[] = [];
+  /** 2^(semitones/12) for scheduled kicks/melody/ping. */
+  private combatBgmPitchMul = 1;
+  /**
+   * Carrier only (sub sines + fifth) — for ramping the drone layer when
+   * `KaijuRank` switches to / from boss.
+   */
+  private combatBgmDroneCarriers: { osc: OscillatorNode; baseHz: number }[] = [];
 
   // ------------------------------------------------------------------
   //  Public API
@@ -436,9 +464,81 @@ export class AudioManager {
   }
 
   /**
-   * Title-screen BGM: pre-battle tension — sub drones, looped static layers,
-   * and percussive grit on a ~92 BPM grid. The loop is scheduled with a
-   * look-ahead so timing stays tight; repeated calls while active are no-ops.
+   * Drives the battle-only static bed: inaudible at high HP, ramps in as
+   * `hp / maxHp` falls below `BATTLE_NOISE.HP_FRACTION_START`.
+   */
+  public setBattleNoiseFromPlayerHp(hp: number, maxHp: number): void {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const r = maxHp > 0 ? Math.max(0, hp) / maxHp : 0;
+    let w = 0;
+    if (r < BATTLE_NOISE.HP_FRACTION_START) {
+      w =
+        (BATTLE_NOISE.HP_FRACTION_START - r) / BATTLE_NOISE.HP_FRACTION_START;
+    }
+    if (w < 0.001) {
+      if (this.battleNoiseWet) {
+        const t0 = ctx.currentTime;
+        const g = this.battleNoiseWet;
+        g.gain.cancelScheduledValues(t0);
+        g.gain.setValueAtTime(g.gain.value, t0);
+        g.gain.linearRampToValueAtTime(0, t0 + BATTLE_NOISE.WET_FADE_OUT_S);
+      }
+      return;
+    }
+    this.ensureBattleNoiseEngine(ctx);
+    if (!this.battleNoiseWet) return;
+    const t = ctx.currentTime;
+    const target = w * BATTLE_NOISE.MAX_WET;
+    const g = this.battleNoiseWet;
+    g.gain.cancelScheduledValues(t);
+    g.gain.setValueAtTime(g.gain.value, t);
+    g.gain.linearRampToValueAtTime(target, t + BATTLE_NOISE.WET_RAMP_IN_S);
+  }
+
+  /** Tears down the low-HP bed (call when leaving the combat scene). */
+  public stopBattleNoise(): void {
+    const ctx = this.ctx;
+    const wet = this.battleNoiseWet;
+    this.battleNoiseWet = null;
+    if (!ctx || !wet) {
+      this.teardownBattleNoiseSustain();
+      return;
+    }
+    const now = ctx.currentTime;
+    wet.gain.cancelScheduledValues(now);
+    wet.gain.setValueAtTime(wet.gain.value, now);
+    wet.gain.linearRampToValueAtTime(0, now + BATTLE_NOISE.WET_FADE_OUT_S);
+    setTimeout(() => {
+      this.teardownBattleNoiseSustain();
+      try {
+        wet.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+    }, BATTLE_NOISE.TEARDOWN_MS);
+  }
+
+  private ensureBattleNoiseEngine(ctx: AudioContext): void {
+    if (this.battleNoiseWet) return;
+    if (!this.masterGain) return;
+    const wet = ctx.createGain();
+    wet.gain.setValueAtTime(0, ctx.currentTime);
+    wet.connect(this.masterGain);
+    this.battleNoiseWet = wet;
+    this.startNoiseBed(ctx, wet, this.battleNoiseSustain);
+  }
+
+  private teardownBattleNoiseSustain(): void {
+    for (const n of this.battleNoiseSustain) {
+      stopSourceSafe(n);
+    }
+    this.battleNoiseSustain.length = 0;
+  }
+
+  /**
+   * Title BGM: drones + patterned kicks/melody (no continuous noise bed; grit
+   * is optional via `TITLE_BGM_GRIT`). The loop is scheduled with look-ahead.
    */
   public startTitleBgm(): void {
     const ctx = this.ensureContext();
@@ -453,13 +553,88 @@ export class AudioManager {
     bgmGain.connect(this.masterGain);
     this.bgmGain = bgmGain;
 
-    this.bgmStartDrones(ctx, bgmGain);
-    this.bgmStartNoiseBed(ctx, bgmGain);
+    this.bgmStartDrones(ctx, bgmGain, this.bgmSustainNodes, 1, null);
 
     this.bgmBeatIndex = 0;
     this.bgmPatternCount = 0;
     this.bgmNextBeatTime = ctx.currentTime + TITLE_BGM_SCHEDULE_START_S;
     this.bgmTimer = setInterval(() => this.bgmScheduleAhead(), TITLE_BGM_TICK_MS);
+  }
+
+  /**
+   * Same loop as the title, lower bus gain — runs for the whole MainScene
+   * encounter. Boss waves call {@link setCombatBgmKaijuRank} to transpose up.
+   */
+  public startCombatBgm(): void {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain || this.combatBgmActive) return;
+    this.combatBgmActive = true;
+    this.combatBgmPitchMul = 1;
+    this.combatBgmDroneCarriers = [];
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, ctx.currentTime);
+    g.gain.linearRampToValueAtTime(
+      COMBAT_BGM_BUS_PEAK,
+      ctx.currentTime + COMBAT_BGM_FADE_IN_S,
+    );
+    g.connect(this.masterGain);
+    this.combatBgmGain = g;
+
+    this.combatBgmSustain = [];
+    this.bgmStartDrones(ctx, g, this.combatBgmSustain, 1, this.combatBgmDroneCarriers);
+
+    this.combatBgmBeatIndex = 0;
+    this.combatBgmPatternCount = 0;
+    this.combatBgmNextBeatTime = ctx.currentTime + TITLE_BGM_SCHEDULE_START_S;
+    this.combatBgmTimer = setInterval(
+      () => this.combatBgmScheduleAhead(),
+      TITLE_BGM_TICK_MS,
+    );
+  }
+
+  /** Fades and stops the in-combat procedural loop. */
+  public stopCombatBgm(): void {
+    if (!this.combatBgmActive) return;
+    this.combatBgmActive = false;
+
+    if (this.combatBgmTimer !== null) {
+      clearInterval(this.combatBgmTimer);
+      this.combatBgmTimer = null;
+    }
+
+    const ctx = this.ctx;
+    const gain = this.combatBgmGain;
+    const sustains = this.combatBgmSustain.splice(0);
+    this.combatBgmDroneCarriers = [];
+    if (ctx && gain) {
+      const now = ctx.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(0, now + COMBAT_BGM_FADE_OUT_S);
+      setTimeout(() => {
+        stopSustainsList(sustains);
+        try {
+          gain.disconnect();
+        } catch {
+          /* */
+        }
+      }, COMBAT_BGM_SUSTAIN_STOP_MS);
+    } else {
+      stopSustainsList(sustains);
+    }
+    this.combatBgmGain = null;
+  }
+
+  /**
+   * Only `boss` is transposed (see `COMBAT_BGM_BOSS_TRANSPOSE_SEMITONES`);
+   * zako and giga stay at the base key.
+   */
+  public setCombatBgmKaijuRank(rank: KaijuRank): void {
+    if (!this.combatBgmActive) return;
+    const semis =
+      rank === "boss" ? COMBAT_BGM_BOSS_TRANSPOSE_SEMITONES : 0;
+    this.applyCombatBgmSemitoneOffset(semis);
   }
 
   /** Fades out and stops the title-screen BGM. */
@@ -475,18 +650,13 @@ export class AudioManager {
     const ctx = this.ctx;
     const gain = this.bgmGain;
     const sustains = this.bgmSustainNodes.splice(0);
-    const stopSustains = (): void => {
-      for (const n of sustains) {
-        stopSourceSafe(n);
-      }
-    };
     if (ctx && gain) {
       const now = ctx.currentTime;
       gain.gain.cancelScheduledValues(now);
       gain.gain.setValueAtTime(gain.gain.value, now);
       gain.gain.linearRampToValueAtTime(0, now + TITLE_BGM_FADE_OUT_S);
       setTimeout(() => {
-        stopSustains();
+        stopSustainsList(sustains);
         try {
           gain.disconnect();
         } catch (_) {
@@ -494,7 +664,7 @@ export class AudioManager {
         }
       }, TITLE_BGM_SUSTAIN_STOP_MS);
     } else {
-      stopSustains();
+      stopSustainsList(sustains);
     }
 
     this.bgmGain = null;
@@ -599,6 +769,7 @@ export class AudioManager {
     baseGain: number,
     lfoHz: number,
     depth: number,
+    sustainList: (OscillatorNode | AudioBufferSourceNode)[],
   ): void {
     const t = ctx.currentTime;
     gainNode.gain.setValueAtTime(baseGain, t);
@@ -610,18 +781,41 @@ export class AudioManager {
     lfo.connect(d);
     d.connect(gainNode.gain);
     lfo.start();
-    this.bgmSustainNodes.push(lfo);
+    sustainList.push(lfo);
+  }
+
+  private applyCombatBgmSemitoneOffset(semitoneOffset: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const mul = Math.pow(2, semitoneOffset / 12);
+    this.combatBgmPitchMul = mul;
+    const t0 = ctx.currentTime;
+    for (const d of this.combatBgmDroneCarriers) {
+      const f = Math.max(12, d.baseHz * mul);
+      const p = d.osc.frequency;
+      p.cancelScheduledValues(t0);
+      p.setValueAtTime(p.value, t0);
+      p.linearRampToValueAtTime(f, t0 + COMBAT_BGM_DRONE_PITCH_RAMP_S);
+    }
   }
 
   /**
-   * Continuous sub-bass: three slightly detuned D1-range sines (tighter
-   * beating) + a low fifth — harsher, more "hangar" than a calm pad.
+   * Continuous sub-bass: three detuned sines + fifth. `outCarriers` receives
+   * the four main oscillators so combat can re-pitch the drone layer for boss
+   * transpose; title passes `null`.
    */
-  private bgmStartDrones(ctx: AudioContext, sink: GainNode): void {
-    for (const freq of TITLE_BGM_SUB_HZ) {
+  private bgmStartDrones(
+    ctx: AudioContext,
+    sink: GainNode,
+    sustainList: (OscillatorNode | AudioBufferSourceNode)[],
+    pitchMul: number,
+    outCarriers: { osc: OscillatorNode; baseHz: number }[] | null,
+  ): void {
+    for (const base of TITLE_BGM_SUB_HZ) {
+      const hz = base * pitchMul;
       const osc = ctx.createOscillator();
       osc.type = "sine";
-      osc.frequency.value = freq;
+      osc.frequency.value = hz;
 
       const droneGain = ctx.createGain();
       droneGain.gain.value = 0.058;
@@ -636,36 +830,45 @@ export class AudioManager {
       osc.connect(droneGain).connect(sink);
       osc.start();
       lfo.start();
-      this.bgmSustainNodes.push(osc, lfo);
+      sustainList.push(osc, lfo);
+      if (outCarriers) {
+        outCarriers.push({ osc, baseHz: base });
+      }
     }
 
+    const baseFifth = TITLE_BGM_FIFTH_HZ;
     const fifth = ctx.createOscillator();
     fifth.type = "sine";
-    fifth.frequency.value = TITLE_BGM_FIFTH_HZ;
+    fifth.frequency.value = baseFifth * pitchMul;
     const fifthGain = ctx.createGain();
     fifthGain.gain.value = 0.044;
     fifth.connect(fifthGain).connect(sink);
     fifth.start();
-    this.bgmSustainNodes.push(fifth);
+    sustainList.push(fifth);
+    if (outCarriers) {
+      outCarriers.push({ osc: fifth, baseHz: baseFifth });
+    }
   }
 
   /**
-   * Layered static: dark rumble + mid "radio" hiss. One buffer fans out to
-   * two filter chains. Slow LFOs add uneasy motion.
+   * Layered static: dark rumble + mid "radio" hiss (battle low-HP bed only).
    */
-  private bgmStartNoiseBed(ctx: AudioContext, sink: GainNode): void {
+  private startNoiseBed(
+    ctx: AudioContext,
+    sink: GainNode,
+    sustainList: (OscillatorNode | AudioBufferSourceNode)[],
+  ): void {
     if (!this.noiseBuffer) return;
 
-    if (!this.titleNoiseBuffer) {
-      this.titleNoiseBuffer = this.createNoiseBuffer(ctx, TITLE_BGM_NOISE_LOOP_S);
+    if (!this.loopNoiseBuffer) {
+      this.loopNoiseBuffer = this.createNoiseBuffer(ctx, TITLE_BGM_NOISE_LOOP_S);
     }
-    const bedBuf = this.titleNoiseBuffer;
+    const bedBuf = this.loopNoiseBuffer;
 
     const n = ctx.createBufferSource();
     n.buffer = bedBuf;
     n.loop = true;
 
-    // --- Dark: wind / sub-static ---
     const hpD = ctx.createBiquadFilter();
     hpD.type = "highpass";
     hpD.frequency.value = 95;
@@ -673,10 +876,17 @@ export class AudioManager {
     lpD.type = "lowpass";
     lpD.frequency.value = 480;
 
+    const bed = BATTLE_NOISE.BED;
     const gDark = ctx.createGain();
-    this.bgmLfoTremoloOnGain(ctx, gDark, 0.034, 0.15, 0.011);
+    this.bgmLfoTremoloOnGain(
+      ctx,
+      gDark,
+      bed.DARK_BASE,
+      bed.DARK_LFO_HZ,
+      bed.DARK_LFO_DEPTH,
+      sustainList,
+    );
 
-    // --- Air: high-band "monitor grain" (second tap from same source) ---
     const hpA = ctx.createBiquadFilter();
     hpA.type = "highpass";
     hpA.frequency.value = 2000;
@@ -685,13 +895,20 @@ export class AudioManager {
     bpA.frequency.value = 4200;
     bpA.Q.value = 0.45;
     const gAir = ctx.createGain();
-    this.bgmLfoTremoloOnGain(ctx, gAir, 0.012, 0.09, 0.0055);
+    this.bgmLfoTremoloOnGain(
+      ctx,
+      gAir,
+      bed.AIR_BASE,
+      bed.AIR_LFO_HZ,
+      bed.AIR_LFO_DEPTH,
+      sustainList,
+    );
 
     n.connect(hpD).connect(lpD).connect(gDark).connect(sink);
     n.connect(hpA).connect(bpA).connect(gAir).connect(sink);
 
     n.start();
-    this.bgmSustainNodes.push(n);
+    sustainList.push(n);
   }
 
   /** Look-ahead scheduler: called on each `TITLE_BGM_TICK_MS` tick. */
@@ -704,6 +921,8 @@ export class AudioManager {
         this.bgmGain,
         this.bgmBeatIndex,
         this.bgmNextBeatTime,
+        this.bgmPatternCount,
+        1,
       );
       this.bgmNextBeatTime += TITLE_BGM_BEAT_S;
       this.bgmBeatIndex++;
@@ -714,32 +933,63 @@ export class AudioManager {
     }
   }
 
+  private combatBgmScheduleAhead(): void {
+    if (!this.combatBgmActive || !this.ctx || !this.combatBgmGain) return;
+    const until = this.ctx.currentTime + TITLE_BGM_LOOKAHEAD_S;
+    while (this.combatBgmNextBeatTime < until) {
+      this.bgmScheduleBeat(
+        this.ctx,
+        this.combatBgmGain,
+        this.combatBgmBeatIndex,
+        this.combatBgmNextBeatTime,
+        this.combatBgmPatternCount,
+        this.combatBgmPitchMul,
+      );
+      this.combatBgmNextBeatTime += TITLE_BGM_BEAT_S;
+      this.combatBgmBeatIndex++;
+      if (this.combatBgmBeatIndex >= TITLE_BGM_PATTERN_BEATS) {
+        this.combatBgmBeatIndex = 0;
+        this.combatBgmPatternCount++;
+      }
+    }
+  }
+
   /**
    * Dispatches all sounds for a single beat position.
-   * ~92 BPM, D minor / Phrygian — stabs, noise grit, and sonar = pre-battle unease.
+   * ~92 BPM; optional `TITLE_BGM_GRIT` (unused by default). Low-HP static is on the battle bus.
    */
   private bgmScheduleBeat(
     ctx: AudioContext,
     sink: GainNode,
     beat: number,
     t: number,
+    patternCount: number,
+    pitchMul: number,
   ): void {
     const kick = TITLE_BGM_KICK[beat];
     if (kick !== undefined) {
-      this.bgmKick(ctx, sink, t, kick);
+      this.bgmKick(ctx, sink, t, kick, pitchMul);
     }
 
     const note = TITLE_BGM_MELODY[beat];
     if (note) {
-      this.bgmNote(ctx, sink, t, note.f, note.d, note.v);
+      this.bgmNote(
+        ctx,
+        sink,
+        t,
+        note.f * pitchMul,
+        note.d,
+        note.v,
+        pitchMul,
+      );
     }
     if (beat === 3) {
       const e = TITLE_BGM_BEAT3_EB;
-      this.bgmNote(ctx, sink, t, e.f, e.d, e.v);
+      this.bgmNote(ctx, sink, t, e.f * pitchMul, e.d, e.v, pitchMul);
     }
 
-    if (beat === 0 && this.bgmPatternCount % 2 === 1) {
-      this.bgmPing(ctx, sink, t);
+    if (beat === 0 && patternCount % 2 === 1) {
+      this.bgmPing(ctx, sink, t, pitchMul);
     }
 
     const grit = TITLE_BGM_GRIT[beat];
@@ -755,11 +1005,13 @@ export class AudioManager {
     sink: GainNode,
     t: number,
     vol: number,
+    pitchMul: number,
   ): void {
+    const m = Math.max(0.5, pitchMul);
     const osc = ctx.createOscillator();
     osc.type = "sine";
-    osc.frequency.setValueAtTime(92, t);
-    osc.frequency.exponentialRampToValueAtTime(34, t + 0.2);
+    osc.frequency.setValueAtTime(92 * m, t);
+    osc.frequency.exponentialRampToValueAtTime(34 * m, t + 0.2);
 
     const env = ctx.createGain();
     env.gain.setValueAtTime(EPSILON, t);
@@ -778,6 +1030,7 @@ export class AudioManager {
     freq: number,
     dur: number,
     vol: number,
+    pitchMul: number,
   ): void {
     const osc = ctx.createOscillator();
     osc.type = "triangle";
@@ -785,7 +1038,7 @@ export class AudioManager {
 
     const lp = ctx.createBiquadFilter();
     lp.type = "lowpass";
-    lp.frequency.value = 1500;
+    lp.frequency.value = Math.min(7200, 1500 * Math.max(1, pitchMul));
     lp.Q.value = 0.55;
 
     const env = ctx.createGain();
@@ -799,11 +1052,17 @@ export class AudioManager {
   }
 
   /** Sonar-style descending sine ping, panned slightly left. */
-  private bgmPing(ctx: AudioContext, sink: GainNode, t: number): void {
+  private bgmPing(
+    ctx: AudioContext,
+    sink: GainNode,
+    t: number,
+    pitchMul: number,
+  ): void {
+    const m = Math.max(0.5, pitchMul);
     const osc = ctx.createOscillator();
     osc.type = "sine";
-    osc.frequency.setValueAtTime(1760, t);
-    osc.frequency.exponentialRampToValueAtTime(1180, t + 1.6);
+    osc.frequency.setValueAtTime(1760 * m, t);
+    osc.frequency.exponentialRampToValueAtTime(1180 * m, t + 1.6);
 
     const env = ctx.createGain();
     env.gain.setValueAtTime(EPSILON, t);
@@ -872,6 +1131,14 @@ function stopSourceSafe(node: AudioScheduledSourceNode): void {
     node.stop();
   } catch {
     /* already stopped */
+  }
+}
+
+function stopSustainsList(
+  nodes: (OscillatorNode | AudioBufferSourceNode)[],
+): void {
+  for (const n of nodes) {
+    stopSourceSafe(n);
   }
 }
 

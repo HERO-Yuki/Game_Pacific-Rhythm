@@ -1,3 +1,5 @@
+import { MATERIAL_ICON_GLYPH } from "./materialIconCodepoints";
+
 /**
  * Weather system configuration.
  *
@@ -12,7 +14,7 @@
  * pure functions only — so `MainScene` stays a thin consumer:
  * pick a weather once per phase, then thread the multiplier
  * helpers (`adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain`)
- * through its combat constants.
+ * and icon helpers such as `getWeatherIconGlyph` through the HUD.
  */
 
 export type Weather = "clear" | "snow" | "sand" | "drought";
@@ -63,9 +65,9 @@ export const WEATHER_EFFECTS: Readonly<Record<Weather, WeatherEffect>> = {
   snow: {
     label: "SNOW",
     color: "#88ccff",
-    hudDetail: "ATK -25% / COOL +50%",
+    hudDetail: "ATK -25% / COOL 50",
     attackDmgMul: 0.75,
-    coolBonusMul: 1.5,
+    coolBonusMul: 1.0,
     heatGainMul: 1.0,
     kaijuNoiseSlots: 0,
   },
@@ -148,4 +150,22 @@ export function adjustCoolDelta(base: number, eff: WeatherEffect): number {
  */
 export function adjustHeatGain(base: number, eff: WeatherEffect): number {
   return Math.round(base * eff.heatGainMul);
+}
+
+/**
+ * One Material Icons PUA character for the top-left weather HUD (use with
+ * `materialIconGlyphStyle` in MainScene — ligature names do not work on canvas).
+ */
+export function getWeatherIconGlyph(weather: Weather): string {
+  switch (weather) {
+    case "clear":
+      return MATERIAL_ICON_GLYPH.weatherClear;
+    case "snow":
+      return MATERIAL_ICON_GLYPH.weatherSnow;
+    case "sand":
+      return MATERIAL_ICON_GLYPH.weatherSand;
+    case "drought":
+      return MATERIAL_ICON_GLYPH.weatherDrought;
+  }
+  return MATERIAL_ICON_GLYPH.weatherClear;
 }

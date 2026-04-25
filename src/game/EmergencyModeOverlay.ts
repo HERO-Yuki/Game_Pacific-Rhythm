@@ -4,11 +4,10 @@ import { EMERGENCY } from "../config/rhythmAndEmergency";
 export interface EmergencyModeDepths {
   readonly emergencyRed: number;
   readonly emergencyVig: number;
-  readonly emergencyText: number;
 }
 
 /**
- * Full-screen crisis layer: radial vignette, multiply flash, and banner.
+ * Full-screen crisis layer: radial vignette + multiply flash (no headline text).
  * Owns create/destroy so `MainScene` can stay a coordinator.
  */
 export class EmergencyModeOverlay {
@@ -16,7 +15,6 @@ export class EmergencyModeOverlay {
   private readonly d: EmergencyModeDepths;
   private image: Phaser.GameObjects.Image | null = null;
   private redFlash: Phaser.GameObjects.Rectangle | null = null;
-  private label: Phaser.GameObjects.Text | null = null;
   private redTimer: Phaser.Time.TimerEvent | null = null;
   private active = false;
 
@@ -52,25 +50,6 @@ export class EmergencyModeOverlay {
       .setScrollFactor(0)
       .setDepth(this.d.emergencyRed)
       .setBlendMode(Phaser.BlendModes.MULTIPLY);
-    this.label = this.scene.add
-      .text(
-        W / 2,
-        H * EMERGENCY.BANNER_Y_RATIO,
-        EMERGENCY.BANNER_TEXT,
-        {
-          fontFamily:
-            "ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace",
-          fontSize: "16px",
-          color: "#ff6666",
-          stroke: "#000000",
-          strokeThickness: 6,
-          align: "center",
-          wordWrap: { width: W * 0.95, useAdvancedWrap: true },
-        },
-      )
-      .setOrigin(0.5, 0)
-      .setScrollFactor(0)
-      .setDepth(this.d.emergencyText);
     this.reapplyVignettePulse(this.image);
     this.redTimer = this.scene.time.addEvent({
       delay: EMERGENCY.RED_GLITCH.intervalMs,
@@ -105,8 +84,6 @@ export class EmergencyModeOverlay {
     this.image = null;
     this.redFlash?.destroy();
     this.redFlash = null;
-    this.label?.destroy();
-    this.label = null;
     if (this.scene.textures.exists(EMERGENCY.VIGNETTE_TEXTURE_KEY)) {
       this.scene.textures.remove(EMERGENCY.VIGNETTE_TEXTURE_KEY);
     }
@@ -124,10 +101,6 @@ export class EmergencyModeOverlay {
       this.reapplyVignettePulse(this.image);
     }
     this.redFlash?.setSize(W, H);
-    this.label?.setPosition(W / 2, H * EMERGENCY.BANNER_Y_RATIO);
-    this.label?.setStyle({
-      wordWrap: { width: W * 0.95, useAdvancedWrap: true },
-    });
   }
 
   private cleanupLoose(): void {

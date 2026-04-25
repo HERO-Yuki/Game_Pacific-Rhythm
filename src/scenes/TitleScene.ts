@@ -50,6 +50,17 @@ const LOG_LINE_DELAY_MS = 130;
 /** Total ms before UI elements (difficulty / engage) become visible */
 const UI_REVEAL_DELAY_MS = 200 + BOOT_LOG.length * LOG_LINE_DELAY_MS + 180;
 
+/**
+ * Phaser 3 does not run hit tests on `alpha: 0` game objects, so a fully
+ * transparent button never receives the pointer. Use a tiny non-zero
+ * alpha until the reveal tweens start (visually identical to invisible).
+ */
+const HIT_ALPHA = 0.01;
+
+/** Extra padding (logical px) around pill / ENGAGE hit areas for easier pointing. */
+const HIT_PAD_PILL = 8;
+const HIT_PAD_ENGAGE = 12;
+
 // =====================================================================
 //  Scene
 // =====================================================================
@@ -78,6 +89,14 @@ export class TitleScene extends Phaser.Scene {
    */
   private delaGothicTexts: Phaser.GameObjects.Text[] = [];
 
+  /** Keys registered for the title menu; cleared in `shutdown` so a return to this scene replays `addKey` cleanly. */
+  private titleKeyboardKeys: Phaser.Input.Keyboard.Key[] = [];
+
+  /** Focus the game canvas on pointer (embeds and browsers often ignore key events until the canvas is focused). */
+  private focusCanvasOnPointer = (): void => {
+    this.game.canvas?.focus();
+  };
+
   constructor() {
     super("TitleScene");
   }
@@ -90,6 +109,13 @@ export class TitleScene extends Phaser.Scene {
     const W = this.scale.width;
     const H = this.scale.height;
 
+    // Coming from `MainScene` (GAME OVER fade / handoff), a non‑1 time scale
+    // or a half-finished camera fade can leave this scene inert. Normalise
+    // before building UI so tweens, beat timer, and BGM schedule run.
+    this.time.timeScale = 1;
+    this.tweens.timeScale = 1;
+    this.cameras.main.resetFX();
+    this.cameras.main.setAlpha(1);
     this.cameras.main.setBackgroundColor(0x0b0f14);
 
     this.buildBackground(W, H);
@@ -101,6 +127,7 @@ export class TitleScene extends Phaser.Scene {
     this.buildFooter(W, H);
 
     this.refreshSelection();
+    this.setupCanvasKeyboardFocus();
     this.setupKeyboard();
     this.startBeatTimer();
     this.tryStartBgm();
@@ -122,6 +149,8 @@ export class TitleScene extends Phaser.Scene {
     this.beatTimer?.remove();
     audio.stopTitleBgm();
     this.bgmStarted = false;
+    this.clearTitleKeyboard();
+    this.input.off("pointerdown", this.focusCanvasOnPointer);
   }
 
   // ================================================================
@@ -326,6 +355,8 @@ export class TitleScene extends Phaser.Scene {
     const selectorY = H * 0.59;
     const btnW = 116;
     const btnH = 38;
+    const hitW = btnW + HIT_PAD_PILL * 2;
+    const hitH = btnH + HIT_PAD_PILL * 2;
     const gap = 10;
     const totalW =
       DIFFICULTY_ORDER.length * btnW + (DIFFICULTY_ORDER.length - 1) * gap;
@@ -373,10 +404,16 @@ export class TitleScene extends Phaser.Scene {
       const ctr = this.add
         .container(cx, selectorY, [bg, labelTxt])
         .setSize(btnW, btnH)
-        .setAlpha(0);
+        .setAlpha(HIT_ALPHA)
+        .setDepth(50);
 
       ctr.setInteractive({
-        hitArea: new Phaser.Geom.Rectangle(-btnW / 2, -btnH / 2, btnW, btnH),
+        hitArea: new Phaser.Geom.Rectangle(
+          -hitW / 2,
+          -hitH / 2,
+          hitW,
+          hitH,
+        ),
         hitAreaCallback: Phaser.Geom.Rectangle.Contains,
         useHandCursor: true,
       });
@@ -423,6 +460,7 @@ export class TitleScene extends Phaser.Scene {
     this.engageGlow = this.add
       .rectangle(W / 2, by, bw + 40, bh + 40, 0xff4400, 0.14)
       .setBlendMode(Phaser.BlendModes.ADD)
+      .setDepth(40)
       .setAlpha(0);
 
     // Button background
@@ -454,10 +492,18 @@ export class TitleScene extends Phaser.Scene {
     this.engageContainer = this.add
       .container(W / 2, by, [this.engageBg, engageLabel])
       .setSize(bw, bh)
-      .setAlpha(0);
+      .setAlpha(HIT_ALPHA)
+      .setDepth(50);
 
+    const eHitW = bw + HIT_PAD_ENGAGE * 2;
+    const eHitH = bh + HIT_PAD_ENGAGE * 2;
     this.engageContainer.setInteractive({
-      hitArea: new Phaser.Geom.Rectangle(-bw / 2, -bh / 2, bw, bh),
+      hitArea: new Phaser.Geom.Rectangle(
+        -eHitW / 2,
+        -eHitH / 2,
+        eHitW,
+        eHitH,
+      ),
       hitAreaCallback: Phaser.Geom.Rectangle.Contains,
       useHandCursor: true,
     });
@@ -510,7 +556,7 @@ export class TitleScene extends Phaser.Scene {
       .text(
         W / 2,
         H - 24,
-        "\u2190 \u2192 / A D / \u2191 \u2193  DIFFICULTY     ENTER / SPACE / CLICK  ENGAGE",
+        "\u2190 \u2192 / A D / \u2191 \u2193  DIFF     1-3  SLOT     ENTER / SPACE  ENGAGE  (CLICK)",
         {
           fontFamily: FONT_UI,
           fontSize: "11px",
@@ -587,33 +633,90 @@ export class TitleScene extends Phaser.Scene {
   //  Keyboard
   // ================================================================
 
+  /**
+   * Embeds and most browsers only deliver `keydown` to the focused
+   * element. Make the canvas focusable and follow the first pointer
+   * on the game so the same pattern as `MainScene` input works
+   * (`addKey` + `on("down")`).
+   */
+  private setupCanvasKeyboardFocus(): void {
+    const canvas = this.game.canvas;
+    if (canvas) {
+      canvas.setAttribute("tabindex", "0");
+      canvas.style.outline = "none";
+    }
+    this.input.on("pointerdown", this.focusCanvasOnPointer);
+  }
+
+  private clearTitleKeyboard(): void {
+    const kb = this.input.keyboard;
+    if (!kb) return;
+    for (const key of this.titleKeyboardKeys) {
+      key.removeAllListeners();
+      kb.removeKey(key, true);
+    }
+    this.titleKeyboardKeys.length = 0;
+  }
+
   private setupKeyboard(): void {
     const kb = this.input.keyboard;
     if (!kb) return;
 
-    kb.addCapture([
-      Phaser.Input.Keyboard.KeyCodes.UP,
-      Phaser.Input.Keyboard.KeyCodes.DOWN,
-      Phaser.Input.Keyboard.KeyCodes.LEFT,
-      Phaser.Input.Keyboard.KeyCodes.RIGHT,
-      Phaser.Input.Keyboard.KeyCodes.W,
-      Phaser.Input.Keyboard.KeyCodes.S,
-      Phaser.Input.Keyboard.KeyCodes.A,
-      Phaser.Input.Keyboard.KeyCodes.D,
-      Phaser.Input.Keyboard.KeyCodes.SPACE,
-      Phaser.Input.Keyboard.KeyCodes.ENTER,
-    ]);
+    kb.addCapture(
+      "UP,DOWN,LEFT,RIGHT,W,A,S,D,SPACE,ENTER,ONE,TWO,THREE",
+    );
 
-    kb.on("keydown-UP", () => this.moveDiff(-1));
-    kb.on("keydown-W", () => this.moveDiff(-1));
-    kb.on("keydown-LEFT", () => this.moveDiff(-1));
-    kb.on("keydown-A", () => this.moveDiff(-1));
-    kb.on("keydown-DOWN", () => this.moveDiff(1));
-    kb.on("keydown-S", () => this.moveDiff(1));
-    kb.on("keydown-RIGHT", () => this.moveDiff(1));
-    kb.on("keydown-D", () => this.moveDiff(1));
-    kb.on("keydown-ENTER", () => this.engage());
-    kb.on("keydown-SPACE", () => this.engage());
+    const K = Phaser.Input.Keyboard.KeyCodes;
+    const track = (key: Phaser.Input.Keyboard.Key) => {
+      this.titleKeyboardKeys.push(key);
+    };
+    const bind = (code: number, fn: () => void) => {
+      const key = kb.addKey(code);
+      key.on("down", fn);
+      track(key);
+    };
+
+    const movePrev = () => {
+      this.moveDiff(-1);
+    };
+    const moveNext = () => {
+      this.moveDiff(1);
+    };
+
+    bind(K.UP, movePrev);
+    bind(K.W, movePrev);
+    bind(K.LEFT, movePrev);
+    bind(K.A, movePrev);
+    bind(K.DOWN, moveNext);
+    bind(K.S, moveNext);
+    bind(K.RIGHT, moveNext);
+    bind(K.D, moveNext);
+
+    bind(K.ENTER, () => {
+      this.engage();
+    });
+    bind(K.SPACE, () => {
+      this.engage();
+    });
+
+    bind(K.ONE, () => {
+      this.selectDifficultyByIndex(0);
+    });
+    bind(K.TWO, () => {
+      this.selectDifficultyByIndex(1);
+    });
+    bind(K.THREE, () => {
+      this.selectDifficultyByIndex(2);
+    });
+  }
+
+  private selectDifficultyByIndex(i: number): void {
+    if (this.starting) return;
+    const n = this.diffButtons.length;
+    if (i < 0 || i >= n) return;
+    this.selectedIndex = i;
+    audio.playClick();
+    this.refreshSelection();
   }
 
   private moveDiff(delta: number): void {

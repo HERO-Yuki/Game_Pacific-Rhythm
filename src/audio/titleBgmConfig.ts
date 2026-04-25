@@ -43,12 +43,18 @@ export const TITLE_BGM_BEAT3_EB: TitleBgmMelodyNote = {
   v: 0.038,
 };
 
-export const TITLE_BGM_GRIT: Readonly<Partial<Record<number, number>>> = {
-  0: 0.055,
-  2: 0.028,
-  4: 0.055,
-  6: 0.028,
-};
+/** Transient static hits — disabled on title; low-HP bed lives on the battle bus. */
+export const TITLE_BGM_GRIT: Readonly<Partial<Record<number, number>>> = {};
 
 export const TITLE_BGM_SUB_HZ = [36.2, 36.9, 37.4] as const;
 export const TITLE_BGM_FIFTH_HZ = 55.0;
+
+/** In-MainScene procedural BGM: quieter than title; boss waves transpose up. */
+export const COMBAT_BGM_BUS_PEAK = 0.5;
+export const COMBAT_BGM_FADE_IN_S = 1.0;
+export const COMBAT_BGM_FADE_OUT_S = 0.5;
+export const COMBAT_BGM_SUSTAIN_STOP_MS = 650;
+/** Boss-only: upward transpose for tension (zako / giga stay at 0). */
+export const COMBAT_BGM_BOSS_TRANSPOSE_SEMITONES = 3;
+/** Re-pitch combat drone layer when `setCombatBgmKaijuRank` changes. */
+export const COMBAT_BGM_DRONE_PITCH_RAMP_S = 0.4;

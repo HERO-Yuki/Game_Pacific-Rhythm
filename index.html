@@ -56,6 +56,8 @@
         margin: 0;
         max-width: 100%;
         max-height: 100%;
+        /* Phaser can show the hand cursor over setInteractive; avoid host/browser suppressing it. */
+        touch-action: none;
       }
     </style>
   </head>

@@ -22,8 +22,8 @@ import { PlayerRhythmInputVfx } from "../game/PlayerRhythmInputVfx";
 import { KAIJU_STATS, pickKaijuRank, type KaijuRank } from "../config/enemies";
 import {
   adjustAttackDmg,
-  adjustCoolDelta,
   adjustHeatGain,
+  getWeatherIconGlyph,
   pickWeather,
   WEATHER_EFFECTS,
   type Weather,
@@ -178,8 +178,6 @@ const DEPTH = {
   emergencyRed: 84,
   /** Radial “black edges / red core” in emergency. */
   emergencyVig: 85,
-  /** Persistent EMERGENCY: … banner. */
-  emergencyText: 86,
   heatVignette: 90,
   /** Boss / Giga pre-fight WARNING — above combat UI, below game-over. */
   rankWarning: 99,
@@ -204,6 +202,8 @@ const HEAT_DELTA = {
   attack: 10,
   special: 80,
   cool: -40,
+  /** Snow: stronger cooling than the base -40; see `executeCombat` COOL branch. */
+  coolSnow: -50,
 } as const;
 
 const PAL = {
@@ -274,24 +274,18 @@ const ACT_KEY_HINT: Record<ActionType, string> = {
 };
 
 /**
- * Per-action button footprint at design resolution (960x540).
- * Encodes a risk-reward hierarchy in pure pixels:
- *
- *  - ATTACK gets the biggest slab so the bread-and-butter move is
- *    the easiest to mash during a pressured rhythm window.
- *  - GUARD and COOL sit at a middle size — important but used
- *    reactively, not hammered.
- *  - SPECIAL is the smallest target on purpose; paired with its
- *    dark-red colour it becomes almost impossible to mis-tap.
+ * All four action buttons use the same width. Height holds a circled
+ * Material icon (left) and a two-line label block (name + key hints) on the right.
  */
-const ACT_BTN_WIDTH: Record<ActionType, number> = {
-  /** ~1.5× GUARD/COOL — primary action gets a two-column "console" layout. */
-  [ActionType.ATTACK]: 285,
-  [ActionType.GUARD]: 150,
-  [ActionType.COOL]: 150,
-  [ActionType.SPECIAL]: 100,
-  [ActionType.IDLE]: 0,
-};
+const ACTION_BUTTON_H = 58;
+const ACTION_BUTTON_ROW_GAP = 14;
+const ACTION_BUTTON_MIN_W = 120;
+const ACTION_BUTTON_MAX_W = 210;
+/** Inner margin from the button edge; icon ring sits in the left column. */
+const ACTION_BUTTON_INNER_PAD = 8;
+/** Icon ring radius — must fit inside {@link ACTION_BUTTON_H}. */
+const ACTION_BUTTON_ICON_R = 20;
+const ACTION_BTN_ICON_GAP = 8;
 
 /**
  * Keyboard bindings for the four player actions. Strings here are
@@ -331,6 +325,10 @@ const HUD_SHADOW = {
 /** 座布団: 黒の半透明。コクピットのコンソール感 */
 const ZABUTON_ALPHA = 0.62;
 const ZABUTON_RADIUS = 8;
+
+/** Weather HUD: Material icon (px) + gap before the text column. */
+const WEATHER_HUD_ICON_PX = 24;
+const WEATHER_HUD_TEXT_X = WEATHER_HUD_ICON_PX + 8;
 const ZABUTON_PAD = 8;
 /** スコア撃破行: 最優先で目立つ金 */
 const SCORE_GOLD = "#ffcc33";
@@ -378,7 +376,6 @@ interface SlotUI {
 interface BtnUI {
   container: Phaser.GameObjects.Container;
   bg: Phaser.GameObjects.Rectangle;
-  textZab: Phaser.GameObjects.Graphics;
   action: ActionType;
 }
 
@@ -578,6 +575,7 @@ export class MainScene extends Phaser.Scene {
   private playerConsoleRim?: Phaser.GameObjects.Rectangle;
   private playerConsoleRimTween?: Phaser.Tweens.Tween;
   /** Top-left weather indicator — big name + small modifier note. */
+  private weatherIcon!: Phaser.GameObjects.Text;
   private weatherLabel!: Phaser.GameObjects.Text;
   private weatherDetailLabel!: Phaser.GameObjects.Text;
   private weatherZab!: Phaser.GameObjects.Graphics;
@@ -726,12 +724,14 @@ export class MainScene extends Phaser.Scene {
       // If a hit-stop is in flight, its out-of-band timeout would try
       // to poke a destroyed scene; drop the handle to be safe.
       this.cancelHitStop();
+      this.resumeGlobalTimeScale();
       this.stopResolutionSchedule();
       this.clearWaveCatharsisHandle();
       this.endEmergencyMode();
       this.stopNextInputSlotHint();
       this.playerConsoleRimTween?.stop();
       this.playerConsoleRimTween = undefined;
+      this.teardownEncounterAudio();
       this.gameClearAutoTitleTimer?.remove(false);
       this.gameClearAutoTitleTimer = null;
       this.input.keyboard?.off("keydown", this.onGameClearKeyForTitleSkip);
@@ -745,6 +745,7 @@ export class MainScene extends Phaser.Scene {
 
     notifyWavedashLoadComplete();
     this.scheduleMaterialIconRasterRefresh();
+    audio.startCombatBgm();
     this.showReadyThenBeginWave();
   }
 
@@ -863,10 +864,13 @@ export class MainScene extends Phaser.Scene {
 
   private layoutWeatherZabBlock(): void {
     const pad = ZABUTON_PAD;
-    const w =
-      Math.max(this.weatherLabel.width, this.weatherDetailLabel.width) +
+    const textW = Math.max(this.weatherLabel.width, this.weatherDetailLabel.width);
+    const w = WEATHER_HUD_TEXT_X + textW + pad * 2;
+    const h =
+      Math.max(WEATHER_HUD_ICON_PX + 2, this.weatherLabel.height) +
+      4 +
+      this.weatherDetailLabel.height +
       pad * 2;
-    const h = this.weatherLabel.height + this.weatherDetailLabel.height + 4 + pad * 2;
     this.weatherZab.clear();
     this.weatherZab.fillStyle(0x000000, ZABUTON_ALPHA);
     this.weatherZab.fillRoundedRect(-2, -2, w, h, ZABUTON_RADIUS);
@@ -913,14 +917,20 @@ export class MainScene extends Phaser.Scene {
     this.refreshProgressHUD();
 
     this.weatherZab = this.add.graphics();
+    this.weatherIcon = this.add
+      .text(0, 0, getWeatherIconGlyph(this.currentWeather), {
+        ...materialIconGlyphStyle(WEATHER_HUD_ICON_PX, "#8b949e", 2),
+      })
+      .setOrigin(0, 0);
     this.weatherLabel = this.add
-      .text(0, 0, " ", { ...this.hudLineTextStyle(13, "#8b949e", "800") })
+      .text(WEATHER_HUD_TEXT_X, 0, " ", { ...this.hudLineTextStyle(13, "#8b949e", "800") })
       .setOrigin(0, 0);
     this.weatherDetailLabel = this.add
-      .text(0, 20, " ", { ...this.hudLineTextStyle(10, "#6e7681", "700") })
+      .text(WEATHER_HUD_TEXT_X, 20, " ", { ...this.hudLineTextStyle(10, "#6e7681", "700") })
       .setOrigin(0, 0);
     this.add.container(18, 18, [
       this.weatherZab,
+      this.weatherIcon,
       this.weatherLabel,
       this.weatherDetailLabel,
     ]);
@@ -1421,25 +1431,27 @@ export class MainScene extends Phaser.Scene {
       ActionType.COOL,
       ActionType.SPECIAL,
     ];
-    // Fixed per-action footprints (design-res pixels) encode a
-    // risk/importance hierarchy straight into the tap target: ATTACK
-    // is the biggest, SPECIAL the tiniest so panicked thumbs don't
-    // mis-fire the overheat-bomb move.
-    const bh = 58;
-    const gap = 14;
+    const gap = ACTION_BUTTON_ROW_GAP;
+    const bh = ACTION_BUTTON_H;
+    // Equal width for every action; row fits inside ~88% of the logical view.
+    const rowAvail = W * 0.88;
+    const bw = Phaser.Math.Clamp(
+      Math.floor(
+        (rowAvail - (acts.length - 1) * gap) / Math.max(1, acts.length),
+      ),
+      ACTION_BUTTON_MIN_W,
+      ACTION_BUTTON_MAX_W,
+    );
     // Horizontal pad stays small so neighbouring tap zones just touch
     // (no overlap → no ambiguity); vertical pad is generous so thumbs
     // landing slightly above or below the button still register.
     const HIT_PAD_X = 6;
     const HIT_PAD_Y = 20;
-    const totalW =
-      acts.reduce((sum, a) => sum + ACT_BTN_WIDTH[a], 0) +
-      (acts.length - 1) * gap;
+    const totalW = acts.length * bw + (acts.length - 1) * gap;
     let cursorX = (W - totalW) / 2;
 
     this.btns = [];
     for (const action of acts) {
-      const bw = ACT_BTN_WIDTH[action];
       const bx = cursorX + bw / 2;
       cursorX += bw + gap;
 
@@ -1447,85 +1459,54 @@ export class MainScene extends Phaser.Scene {
       const bg = this.add
         .rectangle(0, 0, bw, bh, pal.on)
         .setStrokeStyle(2, pal.stroke, 1);
-      const textZab = this.add.graphics();
-      let contents: Phaser.GameObjects.GameObject[];
 
-      if (action === ActionType.ATTACK) {
-        const half = bw * 0.5;
-        const icSz = Math.min(40, Math.floor(bh * 0.64));
-        const bigIc = this.add
-          .text(0, 0, actionTheme(action).icon, {
-            ...materialIconGlyphStyle(icSz, "#e6edf3", 2),
-          })
-          .setOrigin(0.5, 0.5);
-        bigIc.setPosition(-half * 0.5, -6);
-        const nameTxt = this.add
-          .text(0, 0, "ATTACK", {
-            font: '900 20px system-ui, "Segoe UI", sans-serif',
-            color: "#e6edf3",
-            stroke: "#000000",
-            strokeThickness: HUD_STROKE_THICK,
-            shadow: { ...HUD_SHADOW },
-          })
-          .setOrigin(0.5, 0.5);
-        nameTxt.setPosition(half * 0.5, -6);
-        const keyHint = this.add
-          .text(0, 13, ACT_KEY_HINT[action], {
-            font: '800 10px system-ui, "Segoe UI", sans-serif',
-            color: "#b0bac8",
-            stroke: "#000000",
-            strokeThickness: HUD_STROKE_THICK,
-            shadow: { ...HUD_SHADOW },
-          })
-          .setOrigin(0.5);
-        const labelBlockH = Math.max(icSz, 24) + 6 + keyHint.height;
-        const labelBlockW = bw * 0.92;
-        textZab.fillStyle(0x000000, ZABUTON_ALPHA * 0.9);
-        textZab.fillRoundedRect(
-          -labelBlockW / 2,
-          -labelBlockH / 2 - 2,
-          labelBlockW,
-          labelBlockH,
-          6,
-        );
-        contents = [bg, textZab, bigIc, nameTxt, keyHint];
-      } else {
-        const ic = actionTheme(action).icon;
-        const iconGlyph = this.add
-          .text(0, 0, ic, { ...materialIconGlyphStyle(20, "#e6edf3", 2) })
-          .setOrigin(0, 0.5);
-        const nameTxt = this.add
-          .text(0, 0, String(action), {
-            font: '800 14px system-ui, "Segoe UI", sans-serif',
-            color: "#e6edf3",
-            stroke: "#000000",
-            strokeThickness: HUD_STROKE_THICK,
-            shadow: { ...HUD_SHADOW },
-          })
-          .setOrigin(0, 0.5);
-        const labelGap = 8;
-        const labelRowW = iconGlyph.width + labelGap + nameTxt.width;
-        iconGlyph.setPosition(-labelRowW / 2, 0);
-        nameTxt.setPosition(iconGlyph.x + iconGlyph.width + labelGap, 0);
-        const lbl = this.add.container(0, -9, [iconGlyph, nameTxt]);
-        const keyHint = this.add
-          .text(0, 13, ACT_KEY_HINT[action], {
-            font: '800 10px system-ui, "Segoe UI", sans-serif',
-            color: "#b0bac8",
-            stroke: "#000000",
-            strokeThickness: HUD_STROKE_THICK,
-            shadow: { ...HUD_SHADOW },
-          })
-          .setOrigin(0.5);
-        const labelRowH = Math.max(iconGlyph.height, nameTxt.height);
-        const th = labelRowH + 6 + keyHint.height;
-        const tw = Math.max(labelRowW, keyHint.width) + 10;
-        const zx = -tw / 2;
-        const zy = -th / 2;
-        textZab.fillStyle(0x000000, ZABUTON_ALPHA);
-        textZab.fillRoundedRect(zx, zy, tw, th, 6);
-        contents = [bg, textZab, lbl, keyHint];
-      }
+      const leftEdge = -bw / 2;
+      const r = ACTION_BUTTON_ICON_R;
+      const cx = leftEdge + ACTION_BUTTON_INNER_PAD + r;
+      const textLeft = leftEdge + ACTION_BUTTON_INNER_PAD + 2 * r + ACTION_BTN_ICON_GAP;
+      const icPx = Math.min(
+        28,
+        Math.max(20, Math.floor((r * 2 - 4) * 0.9)),
+      );
+      const namePx = bw < 150 ? 12 : 15;
+      const nameStroke = bw < 150 ? 5 : 6;
+
+      const iconRing = this.add
+        .circle(0, 0, r, 0x000000, 0)
+        .setStrokeStyle(2, pal.stroke, 0.75)
+        .setPosition(cx, 0);
+      const iconText = this.add
+        .text(0, 0, actionTheme(action).icon, {
+          ...materialIconGlyphStyle(icPx, "#e6edf3", 2),
+        })
+        .setOrigin(0.5, 0.5)
+        .setPosition(cx, 0);
+      const nameTxt = this.add
+        .text(textLeft, -10, String(action), {
+          font: `900 ${namePx}px system-ui, "Segoe UI", sans-serif`,
+          color: "#e6edf3",
+          stroke: "#000000",
+          strokeThickness: nameStroke,
+          shadow: { ...HUD_SHADOW },
+        })
+        .setOrigin(0, 0.5);
+      const keyHint = this.add
+        .text(textLeft, 10, ACT_KEY_HINT[action], {
+          font: '800 9px system-ui, "Segoe UI", sans-serif',
+          color: "#b0bac8",
+          stroke: "#000000",
+          strokeThickness: 4,
+          shadow: { ...HUD_SHADOW },
+        })
+        .setOrigin(0, 0.5);
+      const contents: Phaser.GameObjects.GameObject[] = [
+        bg,
+        iconRing,
+        iconText,
+        nameTxt,
+        keyHint,
+      ];
+
       if (action === ActionType.SPECIAL) {
         const finGlow = this.add
           .rectangle(0, 0, bw + 18, bh + 10, 0xff9933, 0.22)
@@ -1571,7 +1552,7 @@ export class MainScene extends Phaser.Scene {
         .on("pointerup", () => this.releaseButtonTween(ctr))
         .on("pointerupoutside", () => this.releaseButtonTween(ctr));
 
-      this.btns.push({ container: ctr, bg, textZab, action });
+      this.btns.push({ container: ctr, bg, action });
     }
 
     this.bossFinisherHint = this.add
@@ -2957,6 +2938,8 @@ export class MainScene extends Phaser.Scene {
   /** Paint the top-left weather shelf with the current mood + summary. */
   private refreshWeatherHUD(): void {
     const eff = this.weatherEffect();
+    this.weatherIcon.setText(getWeatherIconGlyph(this.currentWeather));
+    this.weatherIcon.setColor(eff.color);
     this.weatherLabel.setText(`WEATHER: ${eff.label}`).setColor(eff.color);
     this.weatherDetailLabel.setText(eff.hudDetail);
     this.layoutWeatherZabBlock();
@@ -2970,10 +2953,6 @@ export class MainScene extends Phaser.Scene {
 
   private weatherAdjAtkDmg(base: number): number {
     return adjustAttackDmg(base, this.weatherEffect());
-  }
-
-  private weatherAdjCoolDelta(base: number): number {
-    return adjustCoolDelta(base, this.weatherEffect());
   }
 
   private weatherAdjHeatGain(base: number): number {
@@ -3006,6 +2985,7 @@ export class MainScene extends Phaser.Scene {
       ZABUTON_PAD,
     );
     this.currentKaijuRank = rank;
+    audio.setCombatBgmKaijuRank(rank);
   }
 
   /* ---- Rhythm phase (Foreshadow + Programming, 8 beats) ---- */
@@ -3377,6 +3357,10 @@ export class MainScene extends Phaser.Scene {
     if (this.waveCatharsisRealHandle !== null) {
       window.clearTimeout(this.waveCatharsisRealHandle);
       this.waveCatharsisRealHandle = null;
+      // The cancelled timeout normally calls `resumeGlobalTimeScale`; if we
+      // clear it early (GAME OVER, scene shutdown), restore scale here or
+      // `this.time` stays at 0 and handoff/title are frozen.
+      this.resumeGlobalTimeScale();
     }
   }
 
@@ -3690,8 +3674,10 @@ export class MainScene extends Phaser.Scene {
         }
         break;
 
-      case ActionType.COOL:
-        this.playerHeat += this.weatherAdjCoolDelta(HEAT_DELTA.cool);
+      case ActionType.COOL: {
+        const coolD =
+          this.currentWeather === "snow" ? HEAT_DELTA.coolSnow : HEAT_DELTA.cool;
+        this.playerHeat += coolD;
         audio.playCool({ pan: PAN_PLAYER });
         if (kAct === ActionType.ATTACK) {
           const vulnDmg = this.weatherAdjAtkDmg(DMG.coolVulnerable);
@@ -3710,6 +3696,7 @@ export class MainScene extends Phaser.Scene {
           this.flash(pR, VFX.flash.playerCool);
         }
         break;
+      }
 
       case ActionType.SPECIAL: {
         this.playerHeat += this.weatherAdjHeatGain(HEAT_DELTA.special);
@@ -4123,14 +4110,30 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
+   * Stops the in-scene procedural BGM and low-HP static (also runs on
+   * {@link Phaser.Scenes.Events.SHUTDOWN}).
+   */
+  private teardownEncounterAudio(): void {
+    audio.stopBattleNoise();
+    audio.stopCombatBgm();
+  }
+
+  /**
    * Cross-fade to `TitleScene` from GAME_OVER or GAME_CLEAR. Idempotent.
    */
   private beginHandoffToTitle(): void {
     if (this.resultScreenNavInProgress) return;
     this.resultScreenNavInProgress = true;
+    // Wave-win catharsis sets timeScale to 0 until a setTimeout fires. If the
+    // player hits GAME OVER during that window, `clearWaveCatharsisHandle` +
+    // `endGame` should have restored scale — but always normalise here so
+    // `camera.fadeOut` and `time.delayedCall` are not stuck on a frozen clock
+    // (symptom: black screen / no TitleScene, or title with no tweens or BGM).
+    this.resumeGlobalTimeScale();
     this.input.keyboard?.off("keydown", this.onGameClearKeyForTitleSkip);
     this.gameClearAutoTitleTimer?.remove(false);
     this.gameClearAutoTitleTimer = null;
+    this.teardownEncounterAudio();
     this.cameras.main.resetFX();
     this.cameras.main.fadeOut(RESULT_FADE_OUT_MS, 0, 0, 0);
     this.time.delayedCall(RESULT_FADE_OUT_MS + 100, () => {
@@ -4144,6 +4147,7 @@ export class MainScene extends Phaser.Scene {
   private beginHandoffRetryFromGameOver(): void {
     if (this.resultScreenNavInProgress) return;
     this.resultScreenNavInProgress = true;
+    this.resumeGlobalTimeScale();
     this.cameras.main.resetFX();
     this.cameras.main.fadeOut(RESULT_RESTART_FADE_MS, 0, 0, 0);
     this.time.delayedCall(RESULT_RESTART_FADE_MS + 80, () => {
@@ -4201,6 +4205,7 @@ export class MainScene extends Phaser.Scene {
     this.updateHeatDangerUI(ht);
     this.updateBossFinisherPrompt();
     this.updateEmergencyFromHP(ph);
+    audio.setBattleNoiseFromPlayerHp(ph, HP_INIT.player);
   }
 
   /**
@@ -4260,7 +4265,6 @@ export class MainScene extends Phaser.Scene {
     const o = new EmergencyModeOverlay(this, {
       emergencyRed: DEPTH.emergencyRed,
       emergencyVig: DEPTH.emergencyVig,
-      emergencyText: DEPTH.emergencyText,
     });
     if (!o.enter(W, H)) return;
     this.emergencyOverlay = o;
@@ -4734,7 +4738,7 @@ export class MainScene extends Phaser.Scene {
     });
     this.controlGuideContainer.setPosition(
       size.width / 2,
-      H * 0.855 + 29 + 20,
+      H * 0.855 + ACTION_BUTTON_H / 2 + 20,
     );
     this.msgHudContainer.setPosition(size.width / 2, size.height * 0.53);
     if (this.msgLabel.text) {
