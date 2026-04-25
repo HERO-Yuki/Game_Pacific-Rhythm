@@ -111,9 +111,13 @@ export class WalletManager {
     if (!guard.ok) return guard;
     const message = this.buildScoreMessage(score, address);
     try {
+      // MetaMask and most EIP-1193 clients expect the payload as 0x-hex
+      // UTF-8 bytes, not a raw string — otherwise the popup can fail to
+      // sign or show "Invalid parameters" / a stuck request.
+      const dataHex = this.utf8StringTo0xHex(message);
       const signature = (await guard.provider.request!({
         method: "personal_sign",
-        params: [message, address],
+        params: [dataHex, address],
       })) as string;
       if (typeof signature !== "string" || signature.length === 0) {
         return {
@@ -129,6 +133,34 @@ export class WalletManager {
   }
 
   /**
+   * Picks a single provider for `request()`. If several wallets are
+   * injected (Chrome + `providers` array), prefer MetaMask so connect + sign
+   * hit the same extension the user expects.
+   */
+  private getRequestProvider():
+    | NonNullable<Window["ethereum"]>
+    | undefined {
+    const eth = window.ethereum;
+    if (!eth?.request) return undefined;
+    const withProviders = eth as unknown as {
+      isMetaMask?: boolean;
+      providers?: Array<{
+        isMetaMask?: boolean;
+        request?: (args: {
+          method: string;
+          params?: unknown[] | object;
+        }) => Promise<unknown>;
+      }>;
+    };
+    const list = withProviders.providers;
+    if (Array.isArray(list) && list.length > 0) {
+      const mm = list.find((p) => p.isMetaMask && typeof p.request === "function");
+      if (mm?.request) return mm as NonNullable<Window["ethereum"]>;
+    }
+    return eth;
+  }
+
+  /**
    * Shared pre-flight for every RPC. Returns either a narrowed
    * provider handle (when the EIP-1193 injection is usable) or a
    * ready-to-return `WalletErr` with `code: "no-provider"` — so
@@ -138,7 +170,8 @@ export class WalletManager {
   private requireProvider():
     | { ok: true; provider: NonNullable<Window["ethereum"]> }
     | WalletErr {
-    if (!this.isProviderAvailable() || !window.ethereum?.request) {
+    const provider = this.getRequestProvider();
+    if (!provider) {
       return {
         ok: false,
         code: "no-provider",
@@ -146,7 +179,7 @@ export class WalletManager {
           "No Ethereum wallet detected. Install MetaMask to submit scores.",
       };
     }
-    return { ok: true, provider: window.ethereum };
+    return { ok: true, provider };
   }
 
   /**
@@ -175,6 +208,19 @@ export class WalletManager {
       "Signing this message proves ownership of the above score.",
       "No transaction will be broadcast and no gas will be paid.",
     ].join("\n");
+  }
+
+  /**
+   * Encodes a string as `0x` + hex(UTF-8 bytes) for `personal_sign` — required
+   * by MetaMask’s JSON-RPC handler for reliable popups and verification.
+   */
+  private utf8StringTo0xHex(utf8: string): string {
+    const bytes = new TextEncoder().encode(utf8);
+    let out = "0x";
+    for (let i = 0; i < bytes.length; i++) {
+      out += bytes[i]!.toString(16).padStart(2, "0");
+    }
+    return out;
   }
 
   /**

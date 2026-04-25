@@ -101,6 +101,15 @@ export class TitleScene extends Phaser.Scene {
     super("TitleScene");
   }
 
+  /**
+   * Runs before `create` every time the scene starts, including a return
+   * from `MainScene` after game over. Resets state that must never survive
+   * a cold stop (same reuse fix as the `starting` field in `create`).
+   */
+  init(): void {
+    this.starting = false;
+  }
+
   // ================================================================
   //  Lifecycle
   // ================================================================
@@ -113,6 +122,10 @@ export class TitleScene extends Phaser.Scene {
     // `scene.start("TitleScene")` after GAME OVER — must reset or all input
     // handlers early-return forever.
     this.starting = false;
+
+    // MainScene tears down the shared keyboard; ensure this scene re-enables
+    // pointer/keyboard (some Phaser / embed paths left input disabled in tests).
+    this.input.enabled = true;
 
     // Coming from `MainScene` (GAME OVER fade / handoff), a non‑1 time scale
     // or a half-finished camera fade can leave this scene inert. Normalise
@@ -157,6 +170,13 @@ export class TitleScene extends Phaser.Scene {
     this.starting = false;
     this.clearTitleKeyboard();
     this.input.off("pointerdown", this.focusCanvasOnPointer);
+    try {
+      this.input.keyboard?.removeCapture(
+        "UP,DOWN,LEFT,RIGHT,W,A,S,D,SPACE,ENTER,ONE,TWO,THREE",
+      );
+    } catch {
+      // ignore
+    }
   }
 
   // ================================================================
