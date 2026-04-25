@@ -154,6 +154,13 @@ const RESULT_FADE_OUT_MS = 400;
 const RESULT_RESTART_FADE_MS = 320;
 
 /**
+ * `window.setTimeout` 戻り値。`time.timeScale === 0` では Phaser の
+ * `this.time` / `delayedCall` が進まないため、K.O. フリーズ・リザルト遷移・
+ * ヒットストップ解除など「実時間で必ず発火」させたい箇所でのみ使う。
+ */
+type WallClockHandle = ReturnType<typeof setTimeout> | null;
+
+/**
  * Heat at or above this value is the "danger zone": the screen shows a
  * pulsing red vignette. Dropping back below triggers a relief flash
  * plus a blue steam burst to reward the clutch cool-down.
@@ -505,7 +512,7 @@ export class MainScene extends Phaser.Scene {
   /** 現在ウェーブのジャスト入力回数（撃破ボーナス表示用）。 */
   private wavePerfectCount = 0;
   /** `onWaveWin` の 800ms 実時間フリーズ用。 */
-  private waveCatharsisRealHandle: number | null = null;
+  private waveCatharsisRealHandle: WallClockHandle = null;
   /**
    * 0-based weather-phase index (every `BOSS_EVERY` waves is one
    * phase). -1 forces a re-roll on the very first wave so
@@ -568,7 +575,7 @@ export class MainScene extends Phaser.Scene {
    * because the scene's own Time.Clock is paused during hit-stop; we
    * track the handle so we can cancel it on scene shutdown/restart.
    */
-  private hitStopResumeHandle: number | null = null;
+  private hitStopResumeHandle: WallClockHandle = null;
 
   /* ---------- heat-danger UI state ---------- */
   private heatDangerActive = false;
@@ -697,17 +704,10 @@ export class MainScene extends Phaser.Scene {
    * report as `-32002 "request already pending"`).
    */
   private walletBusy = false;
-  /**
-   * GAME_CLEAR auto-return — **wall-clock** `setTimeout` so it still fires if
-   * `time.timeScale` was briefly 0 (wave K.O. catharsis uses real `setTimeout` too;
-   * Phaser `delayedCall` would stall until scale returns to 1).
-   */
-  private gameClearAutoTitleHandle: ReturnType<typeof setTimeout> | null = null;
-  /**
-   * Fade-out → `scene.start` / `restart` — must not use `this.time.delayedCall`
-   * while global time can be frozen; same real-time rule as above.
-   */
-  private postFadeSceneHandle: ReturnType<typeof setTimeout> | null = null;
+  /** GAME_CLEAR からの自動タイトル（`WallClockHandle`）。 */
+  private gameClearAutoTitleHandle: WallClockHandle = null;
+  /** フェード後の `start` / `restart`（`WallClockHandle`）。 */
+  private postFadeSceneHandle: WallClockHandle = null;
   /**
    * True while a fade+handoff to title or a fade+restart is running so
    * double taps / double keys cannot start two scene transitions.
@@ -832,8 +832,7 @@ export class MainScene extends Phaser.Scene {
       this.playerConsoleRimTween?.stop();
       this.playerConsoleRimTween = undefined;
       this.teardownEncounterAudio();
-      this.clearGameClearAutoTitleHandle();
-      this.clearPostFadeSceneHandle();
+      this.clearResultHandoffWallClockHandles();
       this.input.keyboard?.off("keydown", this.onGameClearKeyForTitleSkip);
       this.input.off("pointerdown", this.unlockAudioOnFirstGesture);
       this.input.keyboard?.off("keydown", this.unlockAudioOnFirstGesture);
@@ -3604,6 +3603,41 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * GAME_CLEAR の自動戻しとフェード後 `start`/`restart` 用。SHUTDOWN や
+   * 遷移開始時にまとめて掃除する。
+   */
+  private clearResultHandoffWallClockHandles(): void {
+    this.clearGameClearAutoTitleHandle();
+    this.clearPostFadeSceneHandle();
+  }
+
+  /**
+   * カメラフェード完了後に 1 回だけ実行。実時間 `setTimeout` なので
+   * `timeScale === 0` でも遅延は進む（`delayedCall` とは違う）。
+   */
+  private schedulePostFadeHandoff(
+    delayMs: number,
+    action: () => void,
+  ): void {
+    this.clearPostFadeSceneHandle();
+    this.postFadeSceneHandle = window.setTimeout(() => {
+      this.postFadeSceneHandle = null;
+      if (!this.scene.isActive("MainScene")) return;
+      this.resumeGlobalTimeScale();
+      action();
+    }, delayMs);
+  }
+
+  private scheduleGameClearCountdownToTitle(): void {
+    this.clearGameClearAutoTitleHandle();
+    this.gameClearAutoTitleHandle = window.setTimeout(() => {
+      this.gameClearAutoTitleHandle = null;
+      if (this.phase !== GamePhase.GAME_CLEAR) return;
+      this.beginHandoffToTitle();
+    }, GAME_CLEAR_AUTO_TITLE_MS);
+  }
+
   private resetCombo(): void {
     this.comboCount = 0;
   }
@@ -4326,12 +4360,7 @@ export class MainScene extends Phaser.Scene {
 
     this.showGameClearOverlay(timeMs);
 
-    this.clearGameClearAutoTitleHandle();
-    this.gameClearAutoTitleHandle = window.setTimeout(() => {
-      this.gameClearAutoTitleHandle = null;
-      if (this.phase !== GamePhase.GAME_CLEAR) return;
-      this.beginHandoffToTitle();
-    }, GAME_CLEAR_AUTO_TITLE_MS);
+    this.scheduleGameClearCountdownToTitle();
 
     this.input.keyboard?.on("keydown", this.onGameClearKeyForTitleSkip);
   }
@@ -4361,25 +4390,17 @@ export class MainScene extends Phaser.Scene {
   private beginHandoffToTitle(): void {
     if (this.resultScreenNavInProgress) return;
     this.resultScreenNavInProgress = true;
-    // Wave-win catharsis sets timeScale to 0 until a setTimeout fires. If the
-    // player hits GAME OVER during that window, `clearWaveCatharsisHandle` +
-    // `endGame` should have restored scale — but always normalise here so
-    // `camera.fadeOut` / tweens are not stuck on a frozen clock. Use **wall
-    // clock** for the post-fade `scene.start` because Phaser
-    // `time.delayedCall` does not advance when `time.timeScale` is 0.
+    // ウェーブ撃破直後のフリーズ等で timeScale が 0 の可能性がある。フェード
+    // 前に 1 へ戻し、遷移予約は {@link schedulePostFadeHandoff}（実時間）。
     this.resumeGlobalTimeScale();
     this.input.keyboard?.off("keydown", this.onGameClearKeyForTitleSkip);
-    this.clearGameClearAutoTitleHandle();
-    this.clearPostFadeSceneHandle();
+    this.clearResultHandoffWallClockHandles();
     this.teardownEncounterAudio();
     this.cameras.main.resetFX();
     this.cameras.main.fadeOut(RESULT_FADE_OUT_MS, 0, 0, 0);
-    this.postFadeSceneHandle = window.setTimeout(() => {
-      this.postFadeSceneHandle = null;
-      if (!this.scene.isActive("MainScene")) return;
-      this.resumeGlobalTimeScale();
+    this.schedulePostFadeHandoff(RESULT_FADE_OUT_MS + 100, () => {
       this.scene.start("TitleScene");
-    }, RESULT_FADE_OUT_MS + 100);
+    });
   }
 
   /**
@@ -4389,15 +4410,12 @@ export class MainScene extends Phaser.Scene {
     if (this.resultScreenNavInProgress) return;
     this.resultScreenNavInProgress = true;
     this.resumeGlobalTimeScale();
-    this.clearPostFadeSceneHandle();
+    this.clearResultHandoffWallClockHandles();
     this.cameras.main.resetFX();
     this.cameras.main.fadeOut(RESULT_RESTART_FADE_MS, 0, 0, 0);
-    this.postFadeSceneHandle = window.setTimeout(() => {
-      this.postFadeSceneHandle = null;
-      if (!this.scene.isActive("MainScene")) return;
-      this.resumeGlobalTimeScale();
+    this.schedulePostFadeHandoff(RESULT_RESTART_FADE_MS + 80, () => {
       this.scene.restart({ difficulty: this.difficulty });
-    }, RESULT_RESTART_FADE_MS + 80);
+    });
   }
 
   /* ============================================================ */
