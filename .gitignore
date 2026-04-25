@@ -6,8 +6,6 @@ dist
 .env.*
 !.env.example
 
-# Local design notes, prompt drafts, and other scratch material
-# under docs/ — tracked playbooks are negated below.
-docs/*
-!docs/checklist.md
-!docs/verification-intro-ready.md
+# Local notes / dev tooling — not part of the published game
+docs/
+.cursor/
