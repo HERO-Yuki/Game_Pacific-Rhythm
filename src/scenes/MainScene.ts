@@ -1502,7 +1502,7 @@ export class MainScene extends Phaser.Scene {
   /**
    * RESOLUTION: the active row is lit; on telegraph tick the **kaiju** side
    * is emphasized, on resolve the **player** side — so call-and-response
-   * reads as 怪獣 → あなた.
+   * reads as kaiju → you.
    */
   private applyResolutionRowFocus(row: number, kaijuEmphasis: boolean): void {
     for (let i = 0; i < SEQ_LEN; i++) {

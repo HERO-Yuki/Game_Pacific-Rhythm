@@ -180,7 +180,7 @@ INTRO_READY → RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_C
 
 ### Combat HUD (readability)
 
-- **Phase strip** — main label (READING / PROGRAM / RESOLUTION) plus an optional **sub-line** under it. Copy and colours for that line live in [`src/config/phaseFlowCopy.ts`](src/config/phaseFlowCopy.ts) so the “kaiju first → you second” flow stays readable without bloating `MainScene`.
+- **Phase strip** — main label (READING / PROGRAM / RESOLUTION) plus an optional **sub-line** under it (English copy for the jam). Strings and colours live in [`src/config/phaseFlowCopy.ts`](src/config/phaseFlowCopy.ts) so the “kaiju first → you second” flow stays readable without bloating `MainScene`.
 - **Resolution** — the active step row is highlighted; on **telegraph** beats the **kaiju** (upper) slot is emphasised, on **resolve** beats the **player** (lower) slot is emphasised, so call-and-response matches the animation.
 - **Programmer strip** — during the programming phase, the USER CONSOLE outline pulses a bit faster / brighter so the lower row feels “live”.
 - **Weather** — top-left panel: icon + `WEATHER:` line + short modifier text on a dark rounded zab, with a **thin stroke** around the block so it stands off the playfield slightly.
