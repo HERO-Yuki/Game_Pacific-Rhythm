@@ -43,7 +43,7 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
 ### YouTube Playables
 
 - **Fully responsive canvas** — `Phaser.Scale.FIT` + `Phaser.Scale.CENTER_BOTH` on a fixed 960×540 design. The Scale Manager letterboxes into the host iframe on any aspect ratio; gameplay math always sees the same logical coordinates.
-- **Touch-first UX** — action buttons have dynamic widths (ATTACK 200 px / GUARD-COOL 150 px / SPECIAL 100 px) and extended hit-zones that reach ~6 px horizontally / ~20 px vertically past the visible rectangle so panicked thumbs still land.
+- **Touch-first UX** — all four action buttons share the **same** responsive width (row fits ~88 % of the view, then each cell is scaled to ~⅔ of that share for a compact bar), with extended hit-zones ~6 px horizontally / ~20 px vertically past the visible rectangle. Material icons sit left of a two-line label (action name + WASD / arrow hint); text is scaled for legibility and the row is vertically centred in the button.
 - **Zero long-form text** — no dialogue boxes, no multi-screen tutorials. The four actions are colour-coded and prefixed with **Material Icons** PUA glyphs (see [`src/config/materialIconCodepoints.ts`](src/config/materialIconCodepoints.ts) + [`src/config/actionTheme.ts`](src/config/actionTheme.ts)) so the iconography reads in any language without relying on emoji in Canvas. First-time players meet a `CLEAR` Phase 1 (no weather, no fog-of-war) before the game starts layering modifiers.
 - **Embedding hygiene** — `viewport-fit=cover`, `safe-area-inset-*` padding, `overflow: hidden` on `html, body`, arrow keys captured via `kb.addCapture` so the host page never scrolls. See the "Responsive canvas" section below for the full list.
 
@@ -106,14 +106,14 @@ For each press in the programming phase, the game runs **`resolvePlayerRhythmInp
 
 You can mix and match input devices at any time — every scheme routes through the same `onActionClick()` timing gate, so touch, mouse, and keyboard feel identical.
 
-| Action | Button | Width | Base colour | Keyboard (left hand) | Keyboard (right hand) |
-| --- | --- | --- | --- | --- | --- |
-| ATTACK  | (icon) ATTACK  | 200 px | dark slate   | **A** | **←** |
-| GUARD   | (icon) GUARD   | 150 px | dark slate   | **S** | **↓** |
-| COOL    | (icon) COOL    | 150 px | dark slate   | **D** | **→** |
-| SPECIAL | (icon) SPECIAL | 100 px | **dark red** | **W** | **↑** |
+| Action | Material icon | Per-button theme | Keyboard (left hand) | Keyboard (right hand) |
+| --- | --- | --- | --- | --- |
+| ATTACK  | (glyph) + **ATTACK**  | red family    | **A** | **←** |
+| GUARD   | (glyph) + **GUARD**   | green family  | **S** | **↓** |
+| COOL    | (glyph) + **COOL**    | blue family   | **D** | **→** |
+| SPECIAL | (glyph) + **SPECIAL** | purple family | **W** | **↑** |
 
-The button footprints encode a risk/importance hierarchy: ATTACK is the biggest so the bread-and-butter move is the easiest to mash, GUARD and COOL are mid-sized reactive options, and SPECIAL is small and painted a warning red so panicked thumbs don't mis-fire the overheat-bomb move. Each row uses a separate `Text` for the Material glyph and for the English label so Canvas never has to resolve icon-font ligatures by name.
+All four actions use the **same** pixel width in a row; colours come from [`src/config/actionTheme.ts`](src/config/actionTheme.ts) (stroke + fill derived in `buttonThemePalette`). Each button uses a separate `Text` for the Material glyph and for the English label + key line so Canvas never has to mix icon font with TTF in one string.
 
 Every press runs a press-in / bounce-back tween — the container scales to 85 % on pointerdown with `Cubic.easeIn`, then overshoots back to 1.0 with `Back.easeOut` — so touch and keyboard input both feel like heavy mechanical switches. Key hints sit underneath each label for discoverability, and touch hit-zones extend ~6 px horizontally / ~20 px vertically past the visible rectangle for thumb-friendly taps on mobile. Arrow keys are captured so the embedding page never scrolls while the game has focus.
 
@@ -178,6 +178,13 @@ INTRO_READY → RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_C
 
 `INTRO_READY` covers the first-wave **READY** overlay only: the rhythm driver stays idle until `beginWave()` arms the clock. `GAME_CLEAR` fires when the wave counter reaches the difficulty cap (**EASY 9** / **NORMAL 15**); a celebration overlay plays, then cross-fades to the title (tap / key to skip the short auto-timer, or wait). ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
 
+### Combat HUD (readability)
+
+- **Phase strip** — main label (READING / PROGRAM / RESOLUTION) plus an optional **sub-line** under it. Copy and colours for that line live in [`src/config/phaseFlowCopy.ts`](src/config/phaseFlowCopy.ts) so the “kaiju first → you second” flow stays readable without bloating `MainScene`.
+- **Resolution** — the active step row is highlighted; on **telegraph** beats the **kaiju** (upper) slot is emphasised, on **resolve** beats the **player** (lower) slot is emphasised, so call-and-response matches the animation.
+- **Programmer strip** — during the programming phase, the USER CONSOLE outline pulses a bit faster / brighter so the lower row feels “live”.
+- **Weather** — top-left panel: icon + `WEATHER:` line + short modifier text on a dark rounded zab, with a **thin stroke** around the block so it stands off the playfield slightly.
+
 ### ENDLESS tempo
 
 - **Single source of truth** — `beatMsForEndlessWave(wave)` in [`src/config/difficulty.ts`](src/config/difficulty.ts) maps a 1-based wave to beat length. BPM = `min(ENDLESS_BPM_BASE + ENDLESS_BPM_RISE_PER_PHASE * phaseIndexForWave(wave), ENDLESS_BPM_MAX)`; `rhythmMs` is `round(60000 / BPM)`.
@@ -226,7 +233,7 @@ Weather is a _phase-scoped_ modifier bundled in [`src/config/weather.ts`](src/co
 
 On top of the weather-driven sand mask there is a **baseline fog-of-war** rule: once `wave >= KAIJU_BASELINE_NOISE_WAVE` (3) every kaiju reveal slot independently rolls `KAIJU_BASELINE_NOISE_CHANCE` (20 %) of being masked. Both noise sources are OR-ed into a working mask, then **capped to at most two** `[ ??? ]` slots at a time (sand’s pick is kept when the OR would exceed that cap; remaining slots are chosen at random). The final `kaijuNoiseMask: boolean[]` is what the renderer checks, and the console log at wave start prints the masked indices for quick balance debugging.
 
-The multiplications themselves live in `src/config/weather.ts` as three pure functions — `adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain` — so balance tweaks and unit tests can exercise them without a Phaser runtime. `MainScene` keeps thin wrappers (`weatherAdjAtkDmg` et al.) that read `this.weatherEffect()` once so `executeCombat` call sites stay compact. ATK damage is clamped to at least 1 HP so rounding never silently turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK −25 % / COOL +50 %` etc.).
+The multiplications themselves live in `src/config/weather.ts` as three pure functions — `adjustAttackDmg`, `adjustCoolDelta`, `adjustHeatGain` — so balance tweaks and unit tests can exercise them without a Phaser runtime. `MainScene` keeps thin wrappers (`weatherAdjAtkDmg` et al.) that read `this.weatherEffect()` once so `executeCombat` call sites stay compact. ATK damage is clamped to at least 1 HP so rounding never silently turns a landed hit into a no-op. The top-left HUD always shows the active weather and a short modifier note (`ATK −25 % / COOL +50 %` etc.), drawn inside a **rounded fill + thin border** (see `layoutWeatherZabBlock()` in `MainScene.ts`).
 
 ### Combat system
 
@@ -321,6 +328,7 @@ src/
     difficulty.ts        # Difficulty configs, optional `maxWaves`, `phaseIndexForWave`, ENDLESS tempo
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
+    phaseFlowCopy.ts     # Phase sub-line strings + helpers (READING/PROGRAM/RESOLUTION hints)
     rhythmAndEmergency.ts # `resolvePlayerRhythmInput`, PERFECT/GOOD, emergency HP, beat SFX pitch
     combatJuice.ts        # Combo ATK/SPL scaling, wave-defeat freeze/bonus, OH SFX volumes, `flooredWithCombo`
   web3/

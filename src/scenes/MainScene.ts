@@ -42,6 +42,13 @@ import {
   THEME_TINT_HEAVY,
 } from "../config/actionTheme";
 import {
+  PHASE_FLOW,
+  phaseFlowKaijuBeat,
+  phaseFlowPlayerInput,
+  phaseFlowPlayerResolve,
+  phaseFlowTelegraph,
+} from "../config/phaseFlowCopy";
+import {
   MATERIAL_ICON_GLYPH,
   materialIconGlyphStyle,
 } from "../config/materialIconCodepoints";
@@ -116,6 +123,25 @@ const TOTAL_BEATS = SEQ_LEN * 2;
  */
 const RESOLVE_BEATS_PER_STEP = 2;
 const RESOLVE_TOTAL_TICKS = SEQ_LEN * RESOLVE_BEATS_PER_STEP;
+
+/**
+ * Resolution step row: inactive rows dim; active row shows kaiju- or player-led scale/border.
+ */
+const RESOLVE_SLOT_UI = {
+  dimRowAlpha: 0.3,
+  leadScale: 1.2,
+  followScale: 0.9,
+  followAlpha: 0.5,
+  leadBorderW: 4,
+  followBorderW: 2,
+  followBorderAlpha: 0.65,
+} as const;
+
+/** USER CONSOLE rim: idle (rhythm) vs livelier pulse during PROGRAM. */
+const PLAYER_CONSOLE_RIM = {
+  idle: { lo: 0.35, hi: 0.72, durationMs: 1650 },
+  program: { lo: 0.42, hi: 0.92, durationMs: 900 },
+} as const;
 
 const HP_INIT = { player: 100 } as const;
 const OVERHEAT_THRESHOLD = 100;
@@ -274,8 +300,8 @@ const ACT_KEY_HINT: Record<ActionType, string> = {
 };
 
 /**
- * All four action buttons use the same width. Height holds a circled
- * Material icon (left) and a two-line label block (name + key hints) on the right.
+ * All four action buttons use the same width. Height holds a Material
+ * icon (left) and a two-line label block (name + key hints) on the right.
  */
 const ACTION_BUTTON_H = 58;
 const ACTION_BUTTON_ROW_GAP = 14;
@@ -285,16 +311,13 @@ const ACTION_BUTTON_MAX_W = 210;
 const ACTION_BUTTON_WIDTH_SHRINK = 2 / 3;
 /** Do not go narrower than this after {@link ACTION_BUTTON_WIDTH_SHRINK} (touch target + "SPECIAL"). */
 const ACTION_BUTTON_MIN_W_AFTER_SHRINK = 100;
-/** Inner margin from the button edge; icon ring sits in the left column. */
+/** Inner margin from the button edge; icon column on the left. */
 const ACTION_BUTTON_INNER_PAD = 8;
-/** Icon ring radius — must fit inside {@link ACTION_BUTTON_H}. */
+/** Half-width of the icon column — must fit inside {@link ACTION_BUTTON_H}. */
 const ACTION_BUTTON_ICON_R = 20;
 const ACTION_BTN_ICON_GAP = 8;
-/**
- * Nudge the whole icon + label column down so the group sits visually
- * centered in the button (row was riding high in the 58px-tall bar).
- */
-const ACTION_BUTTON_CONTENT_SHIFT_RATIO = 0.1;
+/** {@link buildButtons} action name and key line scale vs the pre-1.5× base. */
+const ACTION_BUTTON_TEXT_SCALE = 1.5;
 
 /**
  * Keyboard bindings for the four player actions. Strings here are
@@ -338,7 +361,15 @@ const ZABUTON_RADIUS = 8;
 /** Weather HUD: Material icon (px) + gap before the text column. */
 const WEATHER_HUD_ICON_PX = 24;
 const WEATHER_HUD_TEXT_X = WEATHER_HUD_ICON_PX + 8;
+/** Thin frame so the weather strip reads a touch clearer than a flat zab. */
+const WEATHER_HUD_STROKE = 0x7d8ba3;
+const WEATHER_HUD_STROKE_W = 1.5;
+const WEATHER_HUD_STROKE_A = 0.72;
 const ZABUTON_PAD = 8;
+/** Sub-line under the main phase label (`phaseFlowHint`). */
+const PHASE_FLOW_HINT_FONT_PX = 11;
+const PHASE_FLOW_HINT_STROKE = "#080c12";
+const PHASE_FLOW_HINT_WORD_WRAP_FRAC = 0.92;
 /** スコア撃破行: 最優先で目立つ金 */
 const SCORE_GOLD = "#ffcc33";
 const STEP_INACTIVE = "#4a5a6a";
@@ -393,6 +424,47 @@ interface StepIndexUI {
   container: Phaser.GameObjects.Container;
   main: Phaser.GameObjects.Text;
   col: "k" | "p";
+}
+
+/**
+ * Two-line label (name + key hint) for {@link MainScene.buildButtons} at width `bw`.
+ * Icon Y is still derived separately from the Material glyph size.
+ */
+function computeActionButtonTextLayout(bw: number): {
+  namePx: number;
+  nameStroke: number;
+  keyPx: number;
+  keyStroke: number;
+  nameLineY: number;
+  keyLineY: number;
+} {
+  const s = ACTION_BUTTON_TEXT_SCALE;
+  const namePx = Phaser.Math.Clamp(
+    Math.round(bw * 0.14 * s),
+    Math.round(14 * s),
+    Math.round(18 * s),
+  );
+  const nameStroke = Math.max(5, Math.min(9, Math.round(namePx * 0.38)));
+  const keyPx = Phaser.Math.Clamp(
+    Math.round(bw * 0.085 * s),
+    Math.round(10 * s),
+    Math.round(12 * s),
+  );
+  const keyStroke = Math.max(4, Math.min(6, Math.round(keyPx * 0.42)));
+  const lineCenterGap = Phaser.Math.Clamp(
+    Math.round((namePx + keyPx) * 0.55 + 4),
+    24,
+    40,
+  );
+  const half = lineCenterGap * 0.5;
+  return {
+    namePx,
+    nameStroke,
+    keyPx,
+    keyStroke,
+    nameLineY: -half,
+    keyLineY: half,
+  };
 }
 
 // ================================================================
@@ -568,6 +640,8 @@ export class MainScene extends Phaser.Scene {
   private specialFinisherGlow!: Phaser.GameObjects.Rectangle;
   private phaseIcon!: Phaser.GameObjects.Text;
   private phaseLabel!: Phaser.GameObjects.Text;
+  /** One line under the main phase label: flow hint (K→P) and step readouts. */
+  private phaseFlowHint!: Phaser.GameObjects.Text;
   private phaseZab!: Phaser.GameObjects.Graphics;
   private phaseHudContainer!: Phaser.GameObjects.Container;
   /** Score row: Material `skull` + kill count + WAVE line; panel autoscales. */
@@ -583,6 +657,7 @@ export class MainScene extends Phaser.Scene {
   /** Cyan stroke around the player sequencer + subtle alpha pulse. */
   private playerConsoleRim?: Phaser.GameObjects.Rectangle;
   private playerConsoleRimTween?: Phaser.Tweens.Tween;
+  private playerRimLively = false;
   /** Top-left weather indicator — big name + small modifier note. */
   private weatherIcon!: Phaser.GameObjects.Text;
   private weatherLabel!: Phaser.GameObjects.Text;
@@ -880,9 +955,17 @@ export class MainScene extends Phaser.Scene {
       4 +
       this.weatherDetailLabel.height +
       pad * 2;
+    const x = -2;
+    const y = -2;
     this.weatherZab.clear();
     this.weatherZab.fillStyle(0x000000, ZABUTON_ALPHA);
-    this.weatherZab.fillRoundedRect(-2, -2, w, h, ZABUTON_RADIUS);
+    this.weatherZab.fillRoundedRect(x, y, w, h, ZABUTON_RADIUS);
+    this.weatherZab.lineStyle(
+      WEATHER_HUD_STROKE_W,
+      WEATHER_HUD_STROKE,
+      WEATHER_HUD_STROKE_A,
+    );
+    this.weatherZab.strokeRoundedRect(x, y, w, h, ZABUTON_RADIUS);
   }
 
   private layoutControlGuideZab(): void {
@@ -922,6 +1005,23 @@ export class MainScene extends Phaser.Scene {
     this.phaseLabel.setDepth(3);
     this.phaseLabel.setText("");
 
+    this.phaseFlowHint = this.add
+      .text(W / 2, 50, "", {
+        font: `600 ${PHASE_FLOW_HINT_FONT_PX}px ${FONT}`,
+        color: "#9fb0c2",
+        stroke: PHASE_FLOW_HINT_STROKE,
+        strokeThickness: 3,
+        align: "center",
+        wordWrap: {
+          width: W * PHASE_FLOW_HINT_WORD_WRAP_FRAC,
+          useAdvancedWrap: true,
+        },
+      })
+      .setOrigin(0.5, 0.5)
+      .setVisible(false)
+      .setDepth(3)
+      .setName("phaseFlowHint");
+
     this.buildScoreHud();
     this.refreshProgressHUD();
 
@@ -944,7 +1044,6 @@ export class MainScene extends Phaser.Scene {
       this.weatherDetailLabel,
     ]);
     this.refreshWeatherHUD();
-    this.layoutWeatherZabBlock();
 
     this.msgZab = this.add.graphics();
     this.msgLabel = this.add
@@ -1297,15 +1396,25 @@ export class MainScene extends Phaser.Scene {
   private startPlayerConsoleRimPulse(): void {
     this.playerConsoleRimTween?.stop();
     if (!this.playerConsoleRim) return;
-    this.playerConsoleRim.setAlpha(0.38);
+    const mode = this.playerRimLively
+      ? PLAYER_CONSOLE_RIM.program
+      : PLAYER_CONSOLE_RIM.idle;
+    this.playerConsoleRim.setAlpha(mode.lo);
     this.playerConsoleRimTween = this.tweens.add({
       targets: this.playerConsoleRim,
-      alpha: { from: 0.35, to: 0.72 },
-      duration: 1650,
+      alpha: { from: mode.lo, to: mode.hi },
+      duration: mode.durationMs,
       yoyo: true,
       repeat: -1,
       ease: "Sine.easeInOut",
     });
+  }
+
+  /** Stronger / faster rim pulse while the player is programming the lower row. */
+  private setPlayerConsoleRimLively(lively: boolean): void {
+    if (this.playerRimLively === lively) return;
+    this.playerRimLively = lively;
+    this.startPlayerConsoleRimPulse();
   }
 
   /** Action-button fills derived from the same theme colour as the sequencer. */
@@ -1391,26 +1500,54 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
-   * RESOLUTION: one row (kaiju + player) is the "current step": scale up,
-   * white ADD border; other rows dimmed.
+   * RESOLUTION: the active row is lit; on telegraph tick the **kaiju** side
+   * is emphasized, on resolve the **player** side — so call-and-response
+   * reads as 怪獣 → あなた.
    */
-  private applyResolutionRowFocus(row: number): void {
+  private applyResolutionRowFocus(row: number, kaijuEmphasis: boolean): void {
     for (let i = 0; i < SEQ_LEN; i++) {
-      const dim = i === row ? 1 : 0.3;
-      this.kSlots[i].root.setAlpha(dim);
-      this.pSlots[i].root.setAlpha(dim);
-      this.kSlots[i].root.setScale(i === row ? 1.15 : 1);
-      this.pSlots[i].root.setScale(i === row ? 1.15 : 1);
-      this.kSlots[i].border.setStrokeStyle(2, PAL.slotStroke, 1);
-      this.pSlots[i].border.setStrokeStyle(2, PAL.slotStroke, 1);
-      this.kSlots[i].border.setBlendMode(Phaser.BlendModes.NORMAL);
-      this.pSlots[i].border.setBlendMode(Phaser.BlendModes.NORMAL);
+      if (i !== row) {
+        this.styleResolutionRowDimmed(i);
+      } else {
+        this.styleResolutionRowCallResponse(i, kaijuEmphasis);
+      }
     }
-    if (row < 0 || row >= SEQ_LEN) return;
-    for (const s of [this.kSlots[row], this.pSlots[row]]) {
-      s.border.setStrokeStyle(4, 0xffffff, 1);
-      s.border.setBlendMode(Phaser.BlendModes.ADD);
-    }
+  }
+
+  private styleResolutionRowDimmed(i: number): void {
+    const u = RESOLVE_SLOT_UI;
+    this.kSlots[i].root.setAlpha(u.dimRowAlpha);
+    this.pSlots[i].root.setAlpha(u.dimRowAlpha);
+    this.kSlots[i].root.setScale(1);
+    this.pSlots[i].root.setScale(1);
+    this.kSlots[i].border.setStrokeStyle(2, PAL.slotStroke, 1);
+    this.pSlots[i].border.setStrokeStyle(2, PAL.slotStroke, 1);
+    this.kSlots[i].border.setBlendMode(Phaser.BlendModes.NORMAL);
+    this.pSlots[i].border.setBlendMode(Phaser.BlendModes.NORMAL);
+  }
+
+  /**
+   * Active row: `emphasizeKaiju` — telegraph; `false` — player program resolves.
+   */
+  private styleResolutionRowCallResponse(
+    i: number,
+    emphasizeKaiju: boolean,
+  ): void {
+    const u = RESOLVE_SLOT_UI;
+    const lead = emphasizeKaiju ? this.kSlots[i] : this.pSlots[i];
+    const follow = emphasizeKaiju ? this.pSlots[i] : this.kSlots[i];
+    lead.root.setAlpha(1);
+    lead.root.setScale(u.leadScale);
+    follow.root.setAlpha(u.followAlpha);
+    follow.root.setScale(u.followScale);
+    lead.border.setStrokeStyle(u.leadBorderW, 0xffffff, 1);
+    lead.border.setBlendMode(Phaser.BlendModes.ADD);
+    follow.border.setStrokeStyle(
+      u.followBorderW,
+      PAL.slotStroke,
+      u.followBorderAlpha,
+    );
+    follow.border.setBlendMode(Phaser.BlendModes.NORMAL);
   }
 
   private buildRhythmIndicators(W: number, H: number): void {
@@ -1497,28 +1634,23 @@ export class MainScene extends Phaser.Scene {
         28,
         Math.max(20, Math.floor((r * 2 - 4) * 0.9)),
       );
-      const namePx = Phaser.Math.Clamp(Math.round(bw * 0.14), 14, 18);
-      const nameStroke = Math.max(5, Math.min(7, Math.round(namePx * 0.38)));
-      const keyPx = Phaser.Math.Clamp(Math.round(bw * 0.085), 10, 12);
-      const keyStroke = Math.max(4, Math.min(5, Math.round(keyPx * 0.42)));
-      const contentShiftY = Math.max(
-        3,
-        Math.round(bh * ACTION_BUTTON_CONTENT_SHIFT_RATIO),
-      );
-      const actionIconNudgeY = Math.max(2, Math.round(icPx * 0.12));
+      const {
+        namePx,
+        nameStroke,
+        keyPx,
+        keyStroke,
+        nameLineY,
+        keyLineY,
+      } = computeActionButtonTextLayout(bw);
+      /** Optical nudge: Material icon sits slightly high in the em box. */
+      const actionIconNudgeY = Math.max(1, Math.round(icPx * 0.1));
 
-      const iconRing = this.add
-        .circle(0, 0, r, 0x000000, 0)
-        .setStrokeStyle(2, pal.stroke, 0.75)
-        .setPosition(cx, contentShiftY);
       const iconText = this.add
         .text(0, 0, actionTheme(action).icon, {
           ...materialIconGlyphStyle(icPx, "#e6edf3", 2),
         })
         .setOrigin(0.5, 0.5)
-        .setPosition(cx, contentShiftY + actionIconNudgeY);
-      const nameLineY = -11 + contentShiftY;
-      const keyLineY = 11 + contentShiftY;
+        .setPosition(cx, actionIconNudgeY);
       const nameTxt = this.add
         .text(textLeft, nameLineY, String(action), {
           font: `900 ${namePx}px system-ui, "Segoe UI", sans-serif`,
@@ -1539,7 +1671,6 @@ export class MainScene extends Phaser.Scene {
         .setOrigin(0, 0.5);
       const contents: Phaser.GameObjects.GameObject[] = [
         bg,
-        iconRing,
         iconText,
         nameTxt,
         keyHint,
@@ -3038,7 +3169,13 @@ export class MainScene extends Phaser.Scene {
   private startRhythmSequence(leadInMs?: number): void {
     const lead = leadInMs ?? this.rhythmMs;
     this.phase = GamePhase.RHYTHM_KAIJU;
-    this.setPhaseDisplay("READING", "#ffcc00", MATERIAL_ICON_GLYPH.phaseReading);
+    this.setPhaseDisplay(
+      "READING",
+      "#ffcc00",
+      MATERIAL_ICON_GLYPH.phaseReading,
+      PHASE_FLOW.readingLabel.text,
+      PHASE_FLOW.readingLabel.color,
+    );
     this.clearSlots();
     this.enableButtons(false);
     this.buttonsReady = false;
@@ -3078,6 +3215,7 @@ export class MainScene extends Phaser.Scene {
       this.revealKaijuSlot(beat);
       this.rhythmCursor.setVisible(true);
       this.moveCursorTo(this.kSlots[beat]);
+      this.setPhaseFromHint(phaseFlowKaijuBeat(beat, SEQ_LEN));
     } else {
       const pIdx = beat - SEQ_LEN;
 
@@ -3087,12 +3225,17 @@ export class MainScene extends Phaser.Scene {
           "PROGRAM",
           "#44cc88",
           MATERIAL_ICON_GLYPH.phaseProgram,
+          PHASE_FLOW.programLabel.text,
+          PHASE_FLOW.programLabel.color,
         );
+        this.setPlayerConsoleRimLively(true);
         if (!this.buttonsReady) {
           this.buttonsReady = true;
           this.enableButtons(true);
         }
       }
+
+      this.setPhaseFromHint(phaseFlowPlayerInput(pIdx, SEQ_LEN));
 
       this.moveCursorTo(this.pSlots[pIdx]);
       this.startTimingBar(this.pSlots[pIdx]);
@@ -3118,6 +3261,7 @@ export class MainScene extends Phaser.Scene {
     this.timingBar.setVisible(false);
     this.enableButtons(false);
     this.buttonsReady = false;
+    this.setPlayerConsoleRimLively(false);
 
     console.log(
       "[Rhythm] Done:",
@@ -3434,6 +3578,8 @@ export class MainScene extends Phaser.Scene {
       "RESOLUTION",
       "#ff6644",
       MATERIAL_ICON_GLYPH.phaseResolve,
+      PHASE_FLOW.resolutionIntro.text,
+      PHASE_FLOW.resolutionIntro.color,
     );
     console.log(
       "[Resolve] K:",
@@ -3468,7 +3614,12 @@ export class MainScene extends Phaser.Scene {
     const stepIdx = tick >> 1;
     const isTelegraph = (tick & 1) === 0;
 
-    this.applyResolutionRowFocus(stepIdx);
+    this.applyResolutionRowFocus(stepIdx, isTelegraph);
+    this.setPhaseFromHint(
+      isTelegraph
+        ? phaseFlowTelegraph(stepIdx, SEQ_LEN)
+        : phaseFlowPlayerResolve(stepIdx, SEQ_LEN),
+    );
     this.pulseBeat();
 
     if (isTelegraph) {
@@ -4052,6 +4203,7 @@ export class MainScene extends Phaser.Scene {
     this.clearWaveCatharsisHandle();
     this.resumeGlobalTimeScale();
     this.stopResolutionSchedule();
+    this.setPlayerConsoleRimLively(false);
     this.phase = GamePhase.GAME_OVER;
     this.rhythmCursor.setVisible(false);
     this.timingBar.setVisible(false);
@@ -4063,7 +4215,7 @@ export class MainScene extends Phaser.Scene {
     this.heatDangerActive = false;
     this.endEmergencyMode();
     this.updateBossFinisherPrompt();
-    this.setPhaseDisplay("GAME OVER", "#ff4444");
+    this.setPhaseDisplay("GAME OVER", "#ff4444", undefined, "");
     console.log(`[GameOver] ${reason} | Score: ${this.score}`);
 
     const extraStatsLine =
@@ -4105,6 +4257,7 @@ export class MainScene extends Phaser.Scene {
     this.clearWaveCatharsisHandle();
     this.resumeGlobalTimeScale();
     this.stopResolutionSchedule();
+    this.setPlayerConsoleRimLively(false);
     this.phase = GamePhase.GAME_CLEAR;
     this.rhythmCursor.setVisible(false);
     this.timingBar.setVisible(false);
@@ -4117,7 +4270,7 @@ export class MainScene extends Phaser.Scene {
 
     const timeMs = Math.max(0, this.time.now - this.runStartTime);
 
-    this.setPhaseDisplay("GAME CLEAR", "#ffd166");
+    this.setPhaseDisplay("GAME CLEAR", "#ffd166", undefined, "");
     console.log(
       `[GameClear] ${this.difficulty.toUpperCase()} ${timeMs}ms — ` +
         `W${this.wave} B${this.bossesDefeated} G${this.gigasDefeated}`,
@@ -4366,11 +4519,16 @@ export class MainScene extends Phaser.Scene {
   /**
    * @param materialIcon — When set, a single Material Icons PUA character
    *   (see `materialIconCodepoints.ts`) beside the label. Omit for GAME OVER / CLEAR.
+   * @param flowHint — When set (incl. empty string), updates the sub-line under
+   *   the phase; empty hides it. Pass `undefined` to leave the current line.
+   * @param flowHintColor — Text colour for the sub-line; defaults to a neutral grey.
    */
   private setPhaseDisplay(
     label: string,
     color: string,
     materialIcon?: string,
+    flowHint?: string,
+    flowHintColor = "#a8b4c0",
   ): void {
     if (materialIcon) {
       this.phaseIcon.setVisible(true);
@@ -4401,6 +4559,35 @@ export class MainScene extends Phaser.Scene {
       duration: 200,
       ease: "Sine.easeOut",
     });
+    if (flowHint !== undefined) {
+      this.setPhaseFlowHint(flowHint, flowHintColor);
+    }
+  }
+
+  private setPhaseFromHint(hint: { text: string; color: string }): void {
+    this.setPhaseFlowHint(hint.text, hint.color);
+  }
+
+  private setPhaseFlowHint(text: string, color: string = "#9fb0c2"): void {
+    if (!text) {
+      this.phaseFlowHint.setVisible(false);
+      this.phaseFlowHint.setText("");
+      return;
+    }
+    const w = this.scale.width;
+    this.phaseFlowHint.setStyle({
+      font: `600 ${PHASE_FLOW_HINT_FONT_PX}px ${FONT}`,
+      color,
+      stroke: PHASE_FLOW_HINT_STROKE,
+      strokeThickness: 3,
+      align: "center",
+      wordWrap: {
+        width: w * PHASE_FLOW_HINT_WORD_WRAP_FRAC,
+        useAdvancedWrap: true,
+      },
+    });
+    this.phaseFlowHint.setText(text);
+    this.phaseFlowHint.setVisible(true);
   }
 
   private clearSlots(): void {
@@ -4758,6 +4945,13 @@ export class MainScene extends Phaser.Scene {
     this.cameras.main.setViewport(0, 0, size.width, size.height);
     this.heatVignette?.setSize(size.width, size.height);
     this.layoutScoreHud();
+    this.phaseFlowHint.setPosition(size.width / 2, 50);
+    this.phaseFlowHint.setStyle({
+      wordWrap: {
+        width: size.width * PHASE_FLOW_HINT_WORD_WRAP_FRAC,
+        useAdvancedWrap: true,
+      },
+    });
     this.controlGuideText.setStyle({
       ...this.hudLineTextStyle(11, "#b8c0ce", "600"),
       align: "center",
