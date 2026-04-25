@@ -121,6 +121,12 @@ const HP_INIT = { player: 100 } as const;
 const OVERHEAT_THRESHOLD = 100;
 const OVERHEAT_STREAK_LIMIT = 3;
 
+/** After GAME_CLEAR: auto hand-off if the player does not skip (ms). */
+const GAME_CLEAR_AUTO_TITLE_MS = 3000;
+/** Fade before `TitleScene` or `restart` from result overlays. */
+const RESULT_FADE_OUT_MS = 400;
+const RESULT_RESTART_FADE_MS = 320;
+
 /**
  * Heat at or above this value is the "danger zone": the screen shows a
  * pulsing red vignette. Dropping back below triggers a relief flash
@@ -279,7 +285,8 @@ const ACT_KEY_HINT: Record<ActionType, string> = {
  *    dark-red colour it becomes almost impossible to mis-tap.
  */
 const ACT_BTN_WIDTH: Record<ActionType, number> = {
-  [ActionType.ATTACK]: 200,
+  /** ~1.5× GUARD/COOL — primary action gets a two-column "console" layout. */
+  [ActionType.ATTACK]: 285,
   [ActionType.GUARD]: 150,
   [ActionType.COOL]: 150,
   [ActionType.SPECIAL]: 100,
@@ -375,14 +382,9 @@ interface BtnUI {
   action: ActionType;
 }
 
-/**
- * シーケンサー上 1–4 番。円形ランプ + 拍アクティブで発光 + ADD ブルーム。
- */
+/** シーケンサー上 1–4 番。数字のみ（ストローク＋低アルファ / アクティブで強調）。 */
 interface StepIndexUI {
   container: Phaser.GameObjects.Container;
-  lamp: Phaser.GameObjects.Arc;
-  lampBloom: Phaser.GameObjects.Arc;
-  addBloom: Phaser.GameObjects.Text;
   main: Phaser.GameObjects.Text;
   col: "k" | "p";
 }
@@ -572,6 +574,9 @@ export class MainScene extends Phaser.Scene {
   /** シーケンサー上 1–4 番 (K 列 / P 列) */
   private stepIndexK: StepIndexUI[] = [];
   private stepIndexP: StepIndexUI[] = [];
+  /** Cyan stroke around the player sequencer + subtle alpha pulse. */
+  private playerConsoleRim?: Phaser.GameObjects.Rectangle;
+  private playerConsoleRimTween?: Phaser.Tweens.Tween;
   /** Top-left weather indicator — big name + small modifier note. */
   private weatherLabel!: Phaser.GameObjects.Text;
   private weatherDetailLabel!: Phaser.GameObjects.Text;
@@ -584,7 +589,6 @@ export class MainScene extends Phaser.Scene {
   private controlGuideZab!: Phaser.GameObjects.Graphics;
   private controlGuideContainer!: Phaser.GameObjects.Container;
   private seqKaijuZab!: Phaser.GameObjects.Graphics;
-  private seqPlayerZab!: Phaser.GameObjects.Graphics;
   private seqVsZab!: Phaser.GameObjects.Graphics;
   private goLayer!: Phaser.GameObjects.Container;
   private goScoreText!: Phaser.GameObjects.Text;
@@ -611,6 +615,22 @@ export class MainScene extends Phaser.Scene {
    * report as `-32002 "request already pending"`).
    */
   private walletBusy = false;
+  /** GAME_CLEAR auto-return; removed if the player skips early. */
+  private gameClearAutoTitleTimer: Phaser.Time.TimerEvent | null = null;
+  /**
+   * True while a fade+handoff to title or a fade+restart is running so
+   * double taps / double keys cannot start two scene transitions.
+   */
+  private resultScreenNavInProgress = false;
+  /**
+   * GAME_CLEAR: any key skips to title — unregistered on hand-off or shutdown
+   * so the handler never leaks to the next run.
+   */
+  private readonly onGameClearKeyForTitleSkip = (): void => {
+    if (this.phase !== GamePhase.GAME_CLEAR) return;
+    if (this.resultScreenNavInProgress) return;
+    this.trySkipGameClearToTitle();
+  };
   private barMaxW = 0;
 
   /* rhythm UI */
@@ -710,6 +730,11 @@ export class MainScene extends Phaser.Scene {
       this.clearWaveCatharsisHandle();
       this.endEmergencyMode();
       this.stopNextInputSlotHint();
+      this.playerConsoleRimTween?.stop();
+      this.playerConsoleRimTween = undefined;
+      this.gameClearAutoTitleTimer?.remove(false);
+      this.gameClearAutoTitleTimer = null;
+      this.input.keyboard?.off("keydown", this.onGameClearKeyForTitleSkip);
     });
 
     // Browser autoplay policy: the AudioContext can only start after a
@@ -1087,16 +1112,34 @@ export class MainScene extends Phaser.Scene {
     this.layoutZabutonBehindText(tK, this.seqKaijuZab, ZABUTON_PAD);
     tK.setDepth(1);
 
-    this.seqPlayerZab = this.add.graphics();
-    const tP = this.add
-      .text(0, 0, "PLAYER", { ...this.hudLineTextStyle(11, "#6699ff", "800") })
-      .setOrigin(0.5, 1);
-    this.add.container(mid + sep + groupW / 2, y - this.slotSz / 2 - 18, [
-      this.seqPlayerZab,
-      tP,
-    ]);
-    this.layoutZabutonBehindText(tP, this.seqPlayerZab, ZABUTON_PAD);
-    tP.setDepth(1);
+    const playerColCx = mid + sep + groupW / 2;
+    const topSlotY = y - this.slotSz / 2;
+    this.add
+      .text(
+        playerColCx,
+        topSlotY - 8,
+        "USER CONSOLE",
+        {
+          font: `800 ${Math.max(10, Math.min(12, W * 0.012))}px system-ui, "Segoe UI", sans-serif`,
+          color: "#66ddee",
+          stroke: "#050a10",
+          strokeThickness: 4,
+        },
+      )
+      .setOrigin(0.5, 1)
+      .setDepth(6);
+    this.playerConsoleRim = this.add
+      .rectangle(
+        playerColCx,
+        y,
+        groupW + 24,
+        this.slotSz + 22,
+        0x000000,
+        0,
+      )
+      .setStrokeStyle(1.5, 0x55ddee, 0.5)
+      .setDepth(4);
+    this.startPlayerConsoleRimPulse();
 
     this.kSlots = [];
     this.pSlots = [];
@@ -1108,12 +1151,13 @@ export class MainScene extends Phaser.Scene {
         mid - sep - groupW + this.slotSz / 2 + i * (this.slotSz + gap);
       const psx = mid + sep + this.slotSz / 2 + i * (this.slotSz + gap);
       const num = `${i + 1}`;
-      const pairK = this.createStepIndexPair(ksx, y - this.slotSz / 2 - 3, num, "k");
+      const stepY = y - this.slotSz / 2 - 4;
+      const pairK = this.createStepIndexPair(ksx, stepY, num, "k");
       this.stepIndexK.push(pairK);
-      const pairP = this.createStepIndexPair(psx, y - this.slotSz / 2 - 3, num, "p");
+      const pairP = this.createStepIndexPair(psx, stepY, num, "p");
       this.stepIndexP.push(pairP);
-      this.kSlots.push(this.makeSlot(ksx, y, this.slotSz));
-      this.pSlots.push(this.makeSlot(psx, y, this.slotSz));
+      this.kSlots.push(this.makeSlot(ksx, y, this.slotSz, "kaiju"));
+      this.pSlots.push(this.makeSlot(psx, y, this.slotSz, "player"));
     }
 
     this.seqVsZab = this.add.graphics();
@@ -1125,10 +1169,19 @@ export class MainScene extends Phaser.Scene {
     tV.setDepth(1);
   }
 
-  private makeSlot(x: number, y: number, sz: number): SlotUI {
+  private makeSlot(
+    x: number,
+    y: number,
+    sz: number,
+    side: "kaiju" | "player",
+  ): SlotUI {
     const root = this.add.container(x, y);
+    const underBase =
+      side === "kaiju"
+        ? { c: 0x1a1e28 as number, a: 0.96 }
+        : { c: PAL.slotBg as number, a: 0.98 };
     const underlay = this.add
-      .rectangle(0, 0, sz, sz, PAL.slotBg, 0.98)
+      .rectangle(0, 0, sz, sz, underBase.c, underBase.a)
       .setOrigin(0.5);
     const themeTint = this.add
       .rectangle(0, 0, sz, sz, 0xffffff, 0)
@@ -1139,6 +1192,7 @@ export class MainScene extends Phaser.Scene {
     border.setStrokeStyle(2, PAL.slotStroke);
     const labelZab = this.add.graphics();
     const iconSize = Math.max(20, Math.floor(sz * 0.5));
+    // Geometric centre of the cell (local 0,0 = slot centre in world x,y).
     const icon = this.add
       .text(0, 0, "", {
         ...materialIconGlyphStyle(
@@ -1147,8 +1201,8 @@ export class MainScene extends Phaser.Scene {
           Math.max(2, Math.floor(iconSize * 0.1)),
         ),
       })
-      .setOrigin(0.5)
       .setVisible(false);
+    this.centerSlotActionIcon(icon);
     const label = this.add
       .text(0, 0, "", {
         font: '800 13px system-ui, "Segoe UI", sans-serif',
@@ -1199,6 +1253,26 @@ export class MainScene extends Phaser.Scene {
     this.layoutZabutonBehindText(s.label, s.labelZab, 4, 0.55);
   }
 
+  /** Call after any `setText` / `setFontSize` on a slot’s material icon. */
+  private centerSlotActionIcon(icon: Phaser.GameObjects.Text): void {
+    icon.setPosition(0, 0).setOrigin(0.5, 0.5);
+  }
+
+  /** Cyan USER CONSOLE rim — subtle “live” pulse (kept off slot alpha). */
+  private startPlayerConsoleRimPulse(): void {
+    this.playerConsoleRimTween?.stop();
+    if (!this.playerConsoleRim) return;
+    this.playerConsoleRim.setAlpha(0.38);
+    this.playerConsoleRimTween = this.tweens.add({
+      targets: this.playerConsoleRim,
+      alpha: { from: 0.35, to: 0.72 },
+      duration: 1650,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
+  }
+
   /** Action-button fills derived from the same theme colour as the sequencer. */
   private buttonThemePalette(action: ActionType): {
     on: number;
@@ -1233,7 +1307,9 @@ export class MainScene extends Phaser.Scene {
       this.nextInputSlotTween = undefined;
     }
     if (this.nextInputSlotIndex >= 0 && this.pSlots[this.nextInputSlotIndex]?.root) {
-      this.pSlots[this.nextInputSlotIndex].root.setAlpha(1);
+      const r = this.pSlots[this.nextInputSlotIndex].root;
+      r.setAlpha(1);
+      r.setScale(1);
     }
     this.nextInputSlotIndex = -1;
   }
@@ -1268,10 +1344,11 @@ export class MainScene extends Phaser.Scene {
     this.nextInputSlotIndex = next;
     const r = this.pSlots[next].root;
     r.setAlpha(1);
+    r.setScale(1);
     this.nextInputSlotTween = this.tweens.add({
       targets: r,
-      alpha: { from: 0.5, to: 1 },
-      duration: 700,
+      scale: { from: 0.96, to: 1.035 },
+      duration: 750,
       yoyo: true,
       repeat: -1,
       ease: "Sine.easeInOut",
@@ -1371,41 +1448,84 @@ export class MainScene extends Phaser.Scene {
         .rectangle(0, 0, bw, bh, pal.on)
         .setStrokeStyle(2, pal.stroke, 1);
       const textZab = this.add.graphics();
-      const ic = actionTheme(action).icon;
-      const iconGlyph = this.add
-        .text(0, 0, ic, { ...materialIconGlyphStyle(20, "#e6edf3", 2) })
-        .setOrigin(0, 0.5);
-      const nameTxt = this.add
-        .text(0, 0, String(action), {
-          font: '800 14px system-ui, "Segoe UI", sans-serif',
-          color: "#e6edf3",
-          stroke: "#000000",
-          strokeThickness: HUD_STROKE_THICK,
-          shadow: { ...HUD_SHADOW },
-        })
-        .setOrigin(0, 0.5);
-      const labelGap = 8;
-      const labelRowW = iconGlyph.width + labelGap + nameTxt.width;
-      iconGlyph.setPosition(-labelRowW / 2, 0);
-      nameTxt.setPosition(iconGlyph.x + iconGlyph.width + labelGap, 0);
-      const lbl = this.add.container(0, -9, [iconGlyph, nameTxt]);
-      const keyHint = this.add
-        .text(0, 13, ACT_KEY_HINT[action], {
-          font: '800 10px system-ui, "Segoe UI", sans-serif',
-          color: "#b0bac8",
-          stroke: "#000000",
-          strokeThickness: HUD_STROKE_THICK,
-          shadow: { ...HUD_SHADOW },
-        })
-        .setOrigin(0.5);
-      const labelRowH = Math.max(iconGlyph.height, nameTxt.height);
-      const th = labelRowH + 6 + keyHint.height;
-      const tw = Math.max(labelRowW, keyHint.width) + 10;
-      const zx = -tw / 2;
-      const zy = -th / 2;
-      textZab.fillStyle(0x000000, ZABUTON_ALPHA);
-      textZab.fillRoundedRect(zx, zy, tw, th, 6);
-      const contents: Phaser.GameObjects.GameObject[] = [bg, textZab, lbl, keyHint];
+      let contents: Phaser.GameObjects.GameObject[];
+
+      if (action === ActionType.ATTACK) {
+        const half = bw * 0.5;
+        const icSz = Math.min(40, Math.floor(bh * 0.64));
+        const bigIc = this.add
+          .text(0, 0, actionTheme(action).icon, {
+            ...materialIconGlyphStyle(icSz, "#e6edf3", 2),
+          })
+          .setOrigin(0.5, 0.5);
+        bigIc.setPosition(-half * 0.5, -6);
+        const nameTxt = this.add
+          .text(0, 0, "ATTACK", {
+            font: '900 20px system-ui, "Segoe UI", sans-serif',
+            color: "#e6edf3",
+            stroke: "#000000",
+            strokeThickness: HUD_STROKE_THICK,
+            shadow: { ...HUD_SHADOW },
+          })
+          .setOrigin(0.5, 0.5);
+        nameTxt.setPosition(half * 0.5, -6);
+        const keyHint = this.add
+          .text(0, 13, ACT_KEY_HINT[action], {
+            font: '800 10px system-ui, "Segoe UI", sans-serif',
+            color: "#b0bac8",
+            stroke: "#000000",
+            strokeThickness: HUD_STROKE_THICK,
+            shadow: { ...HUD_SHADOW },
+          })
+          .setOrigin(0.5);
+        const labelBlockH = Math.max(icSz, 24) + 6 + keyHint.height;
+        const labelBlockW = bw * 0.92;
+        textZab.fillStyle(0x000000, ZABUTON_ALPHA * 0.9);
+        textZab.fillRoundedRect(
+          -labelBlockW / 2,
+          -labelBlockH / 2 - 2,
+          labelBlockW,
+          labelBlockH,
+          6,
+        );
+        contents = [bg, textZab, bigIc, nameTxt, keyHint];
+      } else {
+        const ic = actionTheme(action).icon;
+        const iconGlyph = this.add
+          .text(0, 0, ic, { ...materialIconGlyphStyle(20, "#e6edf3", 2) })
+          .setOrigin(0, 0.5);
+        const nameTxt = this.add
+          .text(0, 0, String(action), {
+            font: '800 14px system-ui, "Segoe UI", sans-serif',
+            color: "#e6edf3",
+            stroke: "#000000",
+            strokeThickness: HUD_STROKE_THICK,
+            shadow: { ...HUD_SHADOW },
+          })
+          .setOrigin(0, 0.5);
+        const labelGap = 8;
+        const labelRowW = iconGlyph.width + labelGap + nameTxt.width;
+        iconGlyph.setPosition(-labelRowW / 2, 0);
+        nameTxt.setPosition(iconGlyph.x + iconGlyph.width + labelGap, 0);
+        const lbl = this.add.container(0, -9, [iconGlyph, nameTxt]);
+        const keyHint = this.add
+          .text(0, 13, ACT_KEY_HINT[action], {
+            font: '800 10px system-ui, "Segoe UI", sans-serif',
+            color: "#b0bac8",
+            stroke: "#000000",
+            strokeThickness: HUD_STROKE_THICK,
+            shadow: { ...HUD_SHADOW },
+          })
+          .setOrigin(0.5);
+        const labelRowH = Math.max(iconGlyph.height, nameTxt.height);
+        const th = labelRowH + 6 + keyHint.height;
+        const tw = Math.max(labelRowW, keyHint.width) + 10;
+        const zx = -tw / 2;
+        const zy = -th / 2;
+        textZab.fillStyle(0x000000, ZABUTON_ALPHA);
+        textZab.fillRoundedRect(zx, zy, tw, th, 6);
+        contents = [bg, textZab, lbl, keyHint];
+      }
       if (action === ActionType.SPECIAL) {
         const finGlow = this.add
           .rectangle(0, 0, bw + 18, bh + 10, 0xff9933, 0.22)
@@ -1618,14 +1738,14 @@ export class MainScene extends Phaser.Scene {
       rowY,
       "RETRY",
       0x2a354e,
-      () => this.scene.restart({ difficulty: this.difficulty }),
+      () => this.beginHandoffRetryFromGameOver(),
     );
     const back = this.makeMenuButton(
       W / 2 + 110,
       rowY,
       "BACK TO TITLE",
       0x1a1f2e,
-      () => this.scene.start("TitleScene"),
+      () => this.beginHandoffToTitle(),
     );
 
     // ---- Web3 panel ----------------------------------------------
@@ -1926,8 +2046,8 @@ export class MainScene extends Phaser.Scene {
 
   /**
    * Celebration overlay for a completed EASY / NORMAL run. Big gold
-   * headline, clear-time readout, wave/boss/giga summary. Auto-fades into
-   * the title transition handled by `returnToTitle()`.
+   * headline, clear-time readout, wave/boss/giga summary. Tap / key / auto
+   * timer hand off via {@link beginHandoffToTitle}.
    */
   private showGameClearOverlay(timeMs: number): void {
     const W = this.scale.width;
@@ -2118,11 +2238,17 @@ export class MainScene extends Phaser.Scene {
       .setScale(0.3);
 
     const hint = this.add
-      .text(cx, H - 36, "Returning to title\u2026", {
-        fontFamily: FONT,
-        fontSize: "13px",
-        color: "#7d8694",
-      })
+      .text(
+        cx,
+        H - 36,
+        "Tap, click, or any key to continue  ·  or wait to return",
+        {
+          fontFamily: FONT,
+          fontSize: "13px",
+          color: "#7d8694",
+          align: "center",
+        },
+      )
       .setOrigin(0.5)
       .setDepth(d + 2);
 
@@ -2157,6 +2283,17 @@ export class MainScene extends Phaser.Scene {
     [dim, dim2, sub, stats, hint, row].forEach((o) => {
       o.setAlpha(0);
       this.tweens.add({ targets: o, alpha: 1, duration: 420 });
+    });
+
+    // Full-screen, above text so the player can skip the auto-timer without hunting UI.
+    const tapToContinue = this.add
+      .rectangle(0, 0, W, H, 0x000000, 0)
+      .setOrigin(0)
+      .setScrollFactor(0)
+      .setDepth(d + 30);
+    tapToContinue.setInteractive({ useHandCursor: true });
+    tapToContinue.on("pointerdown", () => {
+      this.trySkipGameClearToTitle();
     });
   }
 
@@ -2426,34 +2563,19 @@ export class MainScene extends Phaser.Scene {
     num: string,
     col: "k" | "p",
   ): StepIndexUI {
-    const r = 15;
-    const centerY = y - this.slotSz / 2 - 9;
-    const dim = col === "k" ? 0x1a0e12 : 0x0c141c;
-    const lamp = this.add.circle(0, 0, r, dim, 0.94);
-    const lampBloom = this.add
-      .circle(0, 0, r, col === "k" ? 0xff4422 : 0x22ddff, 0)
-      .setBlendMode(Phaser.BlendModes.ADD);
-    const addBloom = this.add
-      .text(0, 0, num, {
-        font: `900 13px system-ui, "Segoe UI", sans-serif`,
-        color: "#ffffff",
-        stroke: "#000000",
-        strokeThickness: HUD_STROKE_THICK,
-        shadow: { ...HUD_SHADOW },
-      })
-      .setOrigin(0.5)
-      .setBlendMode(Phaser.BlendModes.ADD)
-      .setAlpha(0);
+    const baseColor = col === "k" ? STEP_INACTIVE : "#5a7a8a";
     const main = this.add
-      .text(0, 0, num, { ...this.hudLineTextStyle(12, STEP_INACTIVE, "800") })
-      .setOrigin(0.5);
-    const container = this.add.container(x, centerY, [
-      lamp,
-      lampBloom,
-      addBloom,
-      main,
-    ]);
-    return { container, lamp, lampBloom, addBloom, main, col };
+      .text(0, 0, num, {
+        font: `800 12px system-ui, "Segoe UI", sans-serif`,
+        color: baseColor,
+        stroke: "#05080c",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5, 0.5)
+      .setPosition(0, 0)
+      .setAlpha(col === "k" ? 0.38 : 0.42);
+    const container = this.add.container(x, y, [main]);
+    return { container, main, col };
   }
 
   private setStepIndexVisual(
@@ -2461,42 +2583,35 @@ export class MainScene extends Phaser.Scene {
     col: "k" | "p",
     active: boolean,
   ): void {
-    const { lamp, lampBloom, addBloom, main } = pair;
+    const { main } = pair;
     if (active) {
       if (col === "k") {
-        lamp.setFillStyle(0x5a2a1a, 0.98);
-        lampBloom.setFillStyle(0xff6633, 0.55);
-      } else {
-        lamp.setFillStyle(0x1a4058, 0.98);
-        lampBloom.setFillStyle(0x55eeff, 0.5);
-      }
-      lampBloom.setAlpha(col === "k" ? 0.5 : 0.55);
-      addBloom
-        .setAlpha(0.4)
-        .setText(main.text)
-        .setColor("#ffffff");
-      main
-        .setColor("#ffffff")
-        .setStyle({
+        main.setAlpha(0.95);
+        main.setStyle({
           font: `900 13px system-ui, "Segoe UI", sans-serif`,
-          color: "#ffffff",
+          color: "#ffccb0",
           stroke: "#000000",
-          strokeThickness: HUD_STROKE_THICK,
-          shadow: { ...HUD_SHADOW },
+          strokeThickness: 4,
         });
+      } else {
+        main.setAlpha(0.95);
+        main.setStyle({
+          font: `900 13px system-ui, "Segoe UI", sans-serif`,
+          color: "#a8f0ff",
+          stroke: "#000000",
+          strokeThickness: 4,
+        });
+      }
     } else {
-      lamp.setFillStyle(col === "k" ? 0x1a0e12 : 0x0c141c, 0.94);
-      lampBloom.setFillStyle(0x000000, 0);
-      lampBloom.setAlpha(0);
-      addBloom.setAlpha(0);
+      const baseColor = col === "k" ? STEP_INACTIVE : "#5a7a8a";
       main
-        .setColor(STEP_INACTIVE)
+        .setAlpha(col === "k" ? 0.35 : 0.4)
+        .setColor(baseColor)
         .setStyle({
           font: `800 12px system-ui, "Segoe UI", sans-serif`,
-          color: STEP_INACTIVE,
-          stroke: "#000000",
-          strokeThickness: HUD_STROKE_THICK,
-          shadow: { ...HUD_SHADOW },
+          color: baseColor,
+          stroke: "#05080c",
+          strokeThickness: 3,
         });
     }
   }
@@ -3020,9 +3135,8 @@ export class MainScene extends Phaser.Scene {
         .setText(KAIJU_NOISE_TEXT);
     } else {
       s.label.setVisible(false);
-      s.icon
-        .setVisible(true)
-        .setText(actionTheme(action).icon);
+      s.icon.setVisible(true).setText(actionTheme(action).icon);
+      this.centerSlotActionIcon(s.icon);
     }
     this.reflowSlotLabelZab(s);
     s.root.setAlpha(0);
@@ -3085,6 +3199,7 @@ export class MainScene extends Phaser.Scene {
       this.time.delayedCall(350, () => {
         s.label.setVisible(false);
         s.icon.setText(actionTheme(ActionType.IDLE).icon).setVisible(true);
+        this.centerSlotActionIcon(s.icon);
         s.themeTint.setFillStyle(ACT_COL[ActionType.IDLE], 1);
         s.themeTint.setAlpha(THEME_TINT_ALPHA);
         s.border.setStrokeStyle(2, ACT_COL[ActionType.IDLE], 1);
@@ -3147,8 +3262,14 @@ export class MainScene extends Phaser.Scene {
     const q = this.rhythmInputQuality[pIdx] ?? "GOOD";
     this.rhythmInputQuality[pIdx] = null;
 
+    this.tweens.killTweensOf(s.root);
+    this.tweens.killTweensOf(s.icon);
+    s.root.setScale(1);
+    s.icon.setScale(1);
+
     s.label.setVisible(false);
     s.icon.setVisible(true).setText(actionTheme(action).icon);
+    this.centerSlotActionIcon(s.icon);
     s.themeTint.setFillStyle(ACT_COL[action], 1);
     s.themeTint.setAlpha(THEME_TINT_HEAVY);
     // Border snaps to pure white for the punch-in frame, then eases
@@ -3158,6 +3279,15 @@ export class MainScene extends Phaser.Scene {
       s.border.setStrokeStyle(2, ACT_COL[action], 1);
     });
     this.reflowSlotLabelZab(s);
+
+    this.tweens.add({
+      targets: s.icon,
+      scaleX: 1.3,
+      scaleY: 1.3,
+      duration: 100,
+      ease: "Cubic.easeOut",
+      yoyo: true,
+    });
 
     // Input bloom: PERFECT already has a gold burst; GOOD keeps a softer flash.
     if (q !== "PERFECT") {
@@ -3348,6 +3478,7 @@ export class MainScene extends Phaser.Scene {
         .setVisible(true)
         .setText(actionTheme(kAct).icon);
       s.icon.setFontSize(Math.max(20, Math.floor(this.slotSz * 0.5)));
+      this.centerSlotActionIcon(s.icon);
       this.reflowSlotLabelZab(s);
     }
 
@@ -3581,9 +3712,7 @@ export class MainScene extends Phaser.Scene {
         break;
 
       case ActionType.SPECIAL: {
-        this.playerHeat += this.weatherAdjHeatGain(
-          this.specialHeatDeltaBase(),
-        );
+        this.playerHeat += this.weatherAdjHeatGain(HEAT_DELTA.special);
         audio.playSpecial({ pan: PAN_PLAYER });
         // Hit-stop is slightly longer on a GUARD break because the
         // payoff of punching through a defence is bigger.
@@ -3971,21 +4100,54 @@ export class MainScene extends Phaser.Scene {
 
     this.showGameClearOverlay(timeMs);
 
-    // Let the full clear fanfare and VFX read before the title hand-off.
-    const RETURN_DELAY = 5000;
-    this.time.delayedCall(RETURN_DELAY, () => this.returnToTitle());
+    this.gameClearAutoTitleTimer?.remove(false);
+    this.gameClearAutoTitleTimer = this.time.delayedCall(
+      GAME_CLEAR_AUTO_TITLE_MS,
+      () => {
+        this.gameClearAutoTitleTimer = null;
+        this.beginHandoffToTitle();
+      },
+    );
+
+    this.input.keyboard?.on("keydown", this.onGameClearKeyForTitleSkip);
   }
 
-  private returnToTitle(): void {
-    // Do not rely on FADE_OUT_COMPLETE — in some runtimes the event can
-    // fail to fire after a busy overlay, leaving the view stuck on black
-    // with `scene.start` never run. Always hand off to the title on a
-    // timer that slightly exceeds the fade duration.
-    const FADE_MS = 350;
+  /**
+   * Skip the GAME_CLEAR countdown and cross-fade to the title (pointer or
+   * key from {@link triggerGameClear}).
+   */
+  private trySkipGameClearToTitle(): void {
+    if (this.phase !== GamePhase.GAME_CLEAR) return;
+    if (this.resultScreenNavInProgress) return;
+    this.beginHandoffToTitle();
+  }
+
+  /**
+   * Cross-fade to `TitleScene` from GAME_OVER or GAME_CLEAR. Idempotent.
+   */
+  private beginHandoffToTitle(): void {
+    if (this.resultScreenNavInProgress) return;
+    this.resultScreenNavInProgress = true;
+    this.input.keyboard?.off("keydown", this.onGameClearKeyForTitleSkip);
+    this.gameClearAutoTitleTimer?.remove(false);
+    this.gameClearAutoTitleTimer = null;
     this.cameras.main.resetFX();
-    this.cameras.main.fadeOut(FADE_MS, 0, 0, 0);
-    this.time.delayedCall(FADE_MS + 120, () => {
+    this.cameras.main.fadeOut(RESULT_FADE_OUT_MS, 0, 0, 0);
+    this.time.delayedCall(RESULT_FADE_OUT_MS + 100, () => {
       this.scene.start("TitleScene");
+    });
+  }
+
+  /**
+   * Cross-fade then `restart` with the same difficulty (game-over RETRY).
+   */
+  private beginHandoffRetryFromGameOver(): void {
+    if (this.resultScreenNavInProgress) return;
+    this.resultScreenNavInProgress = true;
+    this.cameras.main.resetFX();
+    this.cameras.main.fadeOut(RESULT_RESTART_FADE_MS, 0, 0, 0);
+    this.time.delayedCall(RESULT_RESTART_FADE_MS + 80, () => {
+      this.scene.restart({ difficulty: this.difficulty });
     });
   }
 
@@ -4112,10 +4274,6 @@ export class MainScene extends Phaser.Scene {
   /** Recreate the emergency canvas + UI when the logical game size changes. */
   private syncEmergencyLayout(W: number, H: number): void {
     this.emergencyOverlay?.relayout(W, H);
-  }
-
-  private specialHeatDeltaBase(): number {
-    return this.isEmergencyMode ? EMERGENCY.HEAT_SPECIAL : HEAT_DELTA.special;
   }
 
   private spawnRhythmTimingFeedback(

@@ -76,12 +76,12 @@ Pacific Rhythm is designed from day one to hit five of the jam's challenge track
    - **ATTACK** — deals damage; countered by GUARD
    - **GUARD** — blocks the kaiju's ATTACK; no effect otherwise
    - **COOL** — reduces Heat by 40; vulnerable to ATTACK (double damage)
-   - **SPECIAL** — massive damage + pierces GUARD; adds **+80 Heat** (see **Emergency mode** below for a half-cost variant)
+   - **SPECIAL** — massive damage + pierces GUARD; adds **+80 Heat** (before weather multipliers)
 4. **Resolution**: Eight ticks per turn at `resolveMs` (in this build **equal to** `rhythmMs`, so the same wall-clock beat length as the rhythm phase). Even ticks: kaiju _telegraph_; odd ticks: your action resolves. Four steps × two ticks = eight ticks, call-and-response.
 5. **Overheat**: If your mech's Heat reaches 100, your programmed action for that **resolve step** is **cancelled** (the slot is forced to idle). Extra juice: **ERROR** copy, **red slot-edge flashes**, **dark smoke** from the mech, and a layered **`playOverheat`** cue. A three-beep alarm still fires on the first forced step in a turn; follow-up silenced steps use a lower buzz. Three consecutive **overheat-affected** turns = meltdown game over.
 6. **Waves**: Defeat the kaiju to advance. Every **3rd wave** sends a larger, higher-HP **BOSS**, and every **9th wave** unleashes a colossal **GIGA** kaiju with even more HP and presence. **EASY** clears after **9** waves, **NORMAL** after **15**, ENDLESS never ends.
 7. **Boss finisher**: Against a **BOSS** rank only, non-SPECIAL damage cannot drop the kaiju below **1 HP** — you must land **SPECIAL** to finish. The UI highlights the SPECIAL button and shows a short English prompt when the boss is at 1 HP.
-8. **Emergency mode** (player **HP ≤ 30**): A full-screen radial vignette + red stress flash, a persistent **EMERGENCY: COOLING SYSTEM BYPASS ACTIVE** banner, slightly **higher-pitched** beat clicks, and **SPECIAL Heat gain halved** (+40 instead of +80). Stacks visually with the existing Heat-danger vignette when both apply.
+8. **Emergency mode** (player **HP ≤ 30**): A full-screen radial vignette + red stress flash, a persistent **EMERGENCY: COOLING SYSTEM BYPASS ACTIVE** banner, and slightly **higher-pitched** beat clicks. **SPECIAL** still adds the same base **+80 Heat** as at full HP (weather multipliers unchanged). Stacks visually with the existing Heat-danger vignette when both apply.
 9. **Weather** (NORMAL / ENDLESS only): Every 3-wave phase (two zako + one boss/giga) is coloured by one of four weathers — `CLEAR`, `SNOW` (ATK −25 % / COOL +50 %), `SAND` (one kaiju slot masked as `[ ??? ]`), or `DROUGHT` (Heat gain +50 %). EASY disables the system entirely so learners only have to read the rhythm.
 
 ### Difficulty
@@ -176,7 +176,7 @@ The net effect: AI tools let us spend our 10 days on the _interesting_ work — 
 INTRO_READY → RHYTHM_KAIJU → RHYTHM_PLAYER → RESOLUTION → (loop | GAME_CLEAR | GAME_OVER)
 ```
 
-`INTRO_READY` covers the first-wave **READY** overlay only: the rhythm driver stays idle until `beginWave()` arms the clock. `GAME_CLEAR` fires when the wave counter reaches the difficulty cap (**EASY 9** / **NORMAL 15**); a short celebration overlay then returns to the title. ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
+`INTRO_READY` covers the first-wave **READY** overlay only: the rhythm driver stays idle until `beginWave()` arms the clock. `GAME_CLEAR` fires when the wave counter reaches the difficulty cap (**EASY 9** / **NORMAL 15**); a celebration overlay plays, then cross-fades to the title (tap / key to skip the short auto-timer, or wait). ENDLESS bypasses it entirely. `GAME_OVER` routes through the same overlay for meltdown / HP depletion on every difficulty.
 
 ### ENDLESS tempo
 
@@ -242,7 +242,7 @@ Rock-paper-scissors style resolution with Heat management. Each step is split ov
 | **COOL**    | Vulnerable (mech −40)| Heat −40          | Heat −40            |
 | **SPECIAL** | Kaiju −40, Heat +80* | Break (kaiju −50) | Kaiju −40, Heat +80* |
 
-\* **Heat +40** while **Emergency** (player HP ≤ 30) instead of +80. Weather multipliers on Heat gain still apply on top of this base.
+\* Base **+80** before weather multipliers on Heat gain (same whether or not Emergency mode is active).
 
 - **PERFECT chain (offence)** — consecutive **PERFECT** slots in the **same programming phase** raise a running `comboCount`. **GOOD**, **MISS** (including empty slots), or **any player HP loss from the kaiju** reset the chain. Player **ATTACK** and **SPECIAL** damage **dealt to the kaiju** is multiplied by `1 + comboCount × 0.1` (weather-adjusted base first, then floor; tunables in [`src/config/combatJuice.ts`](src/config/combatJuice.ts)). At **chain ≥ 2**, an orange **“N CHAIN!”** pop (zabuton, black stroke) appears near the Heat gauge.
 
@@ -289,7 +289,7 @@ All sound effects are **generated at runtime** from oscillators and a shared noi
 - **Heat danger vignette**: When Heat ≥ `HEAT_DANGER` (80), a full-screen red overlay pulses (alpha `0.15 ⇄ 0.38`, 520 ms yoyo) to telegraph meltdown risk. **Emergency** (HP ≤ 30) uses a **separate** crisis layer implemented by `EmergencyModeOverlay`; both can be visible at once.
 - **Relief flash + steam vent**: The instant a successful `COOL` pulls Heat back below 80, the vignette is cleared, `Camera.flash` bursts a blue-white `(136, 204, 255)` tint, and an **upward cone of light-blue additive particles** vents out of the player mech (30 particles, 240°–300° arc, `gravityY -120`, 720 ms lifespan). The "I made it!" release is now audible, visible, _and_ feels like real steam escaping.
 - **Praise pops**: Non-fatal **SPECIAL** through **GUARD** → centre-screen **CRITICAL!!** Kills no longer use the small **EXCELLENT!!** pop; they feed the **KAIJU DESTROYED** / bonus card + SFX above instead.
-- **Game clear (EASY / NORMAL)** — procedural **C-major** `playGameClear` fanfare plus layered camera / particle juice before auto-return to the title.
+- **Game clear (EASY / NORMAL)** — procedural **C-major** `playGameClear` fanfare plus layered camera / particle juice, then cross-fade to the title (tap, click, or any key to continue immediately, or a few seconds’ auto-timer).
 
 ### Responsive canvas
 
@@ -321,7 +321,7 @@ src/
     difficulty.ts        # Difficulty configs, optional `maxWaves`, `phaseIndexForWave`, ENDLESS tempo
     enemies.ts           # Kaiju rank stats (HP / scale / label) + wave cadence
     weather.ts           # Weather effects (ATK/COOL/HEAT mul, sand mask) + picker
-    rhythmAndEmergency.ts # `resolvePlayerRhythmInput`, PERFECT/GOOD, emergency HP, SPECIAL heat, beat SFX pitch
+    rhythmAndEmergency.ts # `resolvePlayerRhythmInput`, PERFECT/GOOD, emergency HP, beat SFX pitch
     combatJuice.ts        # Combo ATK/SPL scaling, wave-defeat freeze/bonus, OH SFX volumes, `flooredWithCombo`
   web3/
     WalletManager.ts     # EIP-1193 connect + personal_sign score attestation

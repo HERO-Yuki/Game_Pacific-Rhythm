@@ -13,10 +13,8 @@ export const RHYTHM = {
 } as const;
 
 export const EMERGENCY = {
-  /** Player HP at or below this — crisis visuals + half SPECIAL heat. */
+  /** Player HP at or below this — crisis visuals and beat pitch (SPECIAL heat unchanged). */
   HP_THRESHOLD: 30,
-  /** SPECIAL base heat in emergency (base game uses `HEAT_DELTA.special` without this). */
-  HEAT_SPECIAL: 40,
   /** WebGL / canvas key for the radial red/black overlay. */
   VIGNETTE_TEXTURE_KEY: "emergency_radial_vignette",
   BANNER_TEXT: "EMERGENCY: COOLING SYSTEM BYPASS ACTIVE",
